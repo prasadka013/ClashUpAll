@@ -1,0 +1,22 @@
+{
+  "name": "clashup",
+  "version": "1.0.0",
+  "description": "Real-time multiplayer elimination game in a circular arena",
+  "main": "server.js",
+  "scripts": {
+    "build": "esbuild public/game.js --bundle --format=iife --global-name=ClashUpGame --outfile=public/game.bundle.js",
+    "prestart": "npm run build",
+    "start": "node server.js",
+    "dev": "npm run build && node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5",
+    "three": "^0.164.1"
+  },
+  "author": "Antigravity",
+  "license": "ISC",
+  "devDependencies": {
+    "esbuild": "^0.21.5"
+  }
+}

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClashUp | Circular Arena Physics Elimination Game</title>
+  <!-- Meta tags for SEO -->
+  <meta name="description" content="ClashUp is a high-fidelity real-time physics elimination battle arena game. Aim, launch, bounce, and survive in the circular arena!">
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <!-- Stylesheet -->
+  <link rel="stylesheet" href="style.css">
+  <script>
+    window.__clashupClientErrors = [];
+    window.addEventListener('error', function (event) {
+      window.__clashupClientErrors.push(event.message || 'Unknown script error');
+    });
+    window.addEventListener('unhandledrejection', function (event) {
+      window.__clashupClientErrors.push(String(event.reason || 'Unhandled promise rejection'));
+    });
+  </script>
+</head>
+<body>
+  <!-- Ambient glowing background shapes -->
+  <div class="bg-glow bg-glow-1"></div>
+  <div class="bg-glow bg-glow-2"></div>
+  <div class="bg-grid"></div>
+
+  <!-- Notification Banner -->
+  <div id="toast" class="toast hidden"></div>
+
+  <main class="app-container">
+    <!-- SCREEN 1: MAIN MENU (Join/Create) -->
+    <section id="menu-screen" class="screen active">
+      <header class="game-header">
+        <h1 class="logo-text">CLASH<span>UP</span></h1>
+        <p class="subtitle-text">Circular Arena Elimination Battle</p>
+      </header>
+
+      <div class="card glass-panel">
+        <div class="input-group">
+          <label for="player-name">ENTER PILOT NAME</label>
+          <input type="text" id="player-name" maxlength="15" placeholder="Anonymous Roller" autocomplete="off">
+        </div>
+
+        <div class="input-group">
+          <label>CHOOSE YOUR COLOR</label>
+          <div class="color-picker-grid">
+            <button class="color-node active" data-color="#00f0ff" style="background-color: #00f0ff;"></button>
+            <button class="color-node" data-color="#ff2a5f" style="background-color: #ff2a5f;"></button>
+            <button class="color-node" data-color="#39ff14" style="background-color: #39ff14;"></button>
+            <button class="color-node" data-color="#ffcc00" style="background-color: #ffcc00;"></button>
+            <button class="color-node" data-color="#8a2be2" style="background-color: #8a2be2;"></button>
+            <button class="color-node" data-color="#ff5722" style="background-color: #ff5722;"></button>
+            <button class="color-node" data-color="#e91e63" style="background-color: #e91e63;"></button>
+            <div class="custom-color-wrapper">
+              <input type="color" id="custom-color" value="#00f0ff">
+              <span class="custom-color-label">Custom</span>
+            </div>
+          </div>
+        </div>
+
+        <hr class="separator">
+
+        <div class="action-tabs">
+          <button id="tab-create" class="tab-btn active">CREATE ROOM</button>
+          <button id="tab-join" class="tab-btn">JOIN ROOM</button>
+        </div>
+
+        <!-- Create Room Tab Form -->
+        <div id="form-create" class="tab-form active">
+          <button id="btn-create-room" class="btn btn-primary pulse-hover">INITIALIZE ARENA</button>
+        </div>
+
+        <!-- Join Room Tab Form -->
+        <div id="form-join" class="tab-form">
+          <div class="input-group">
+            <input type="text" id="room-code-input" maxlength="4" placeholder="ENTER 4-LETTER CODE" autocomplete="off" style="text-transform: uppercase; text-align: center; letter-spacing: 4px;">
+          </div>
+          <button id="btn-join-room" class="btn btn-secondary">CONNECT TO ROOM</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- SCREEN 2: ROOM LOBBY -->
+    <section id="lobby-screen" class="screen">
+      <header class="lobby-header">
+        <button id="btn-leave-lobby" class="btn-back">LEAVE</button>
+        <div class="room-code-container">
+          <span class="code-label">ROOM CODE</span>
+          <h2 id="room-code-display" class="glow-text">----</h2>
+          <span class="copy-hint" id="btn-copy-code">Click to copy URL</span>
+        </div>
+      </header>
+
+      <div class="lobby-grid">
+        <!-- Players List Panel -->
+        <div class="lobby-panel glass-panel">
+          <div class="panel-header">
+            <h3>CONNECTED PLAYERS (<span id="player-count">0</span>/8)</h3>
+          </div>
+          <div id="player-list" class="player-list-container">
+            <!-- Dynamic elements will be inserted here -->
+          </div>
+        </div>
+
+        <!-- Room Controls Panel -->
+        <div class="lobby-panel glass-panel controls-panel">
+          <div class="panel-header">
+            <h3>READY SEQUENCE</h3>
+          </div>
+          <div class="controls-status">
+            <p class="status-tip">Host can start the game once everyone readies up. Minimum 2 pilots required.</p>
+          </div>
+          <div class="lobby-action-buttons">
+            <button id="btn-ready" class="btn btn-secondary pulse-hover">READY UP</button>
+            
+            <!-- Host Only buttons -->
+            <div id="host-controls" class="host-controls-wrapper hidden">
+              <hr class="separator">
+              <button id="btn-add-bot" class="btn btn-accent btn-sm">ADD AI BOT</button>
+              <button id="btn-start-game" class="btn btn-primary btn-disabled" disabled>ENGAGE LAUNCH SEQUENCE</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SCREEN 3: GAME SCREEN -->
+    <section id="game-screen" class="screen">
+      <!-- Top HUD overlay -->
+      <div class="hud-top glass-panel">
+        <div class="hud-item">
+          <span class="hud-label">ALIVE</span>
+          <span id="hud-alive-count" class="hud-value neon-cyan">0/0</span>
+        </div>
+        <div class="hud-room-code">
+          <span id="hud-code-text">ABCD</span>
+        </div>
+        <div class="hud-item">
+          <span class="hud-label">PHASE</span>
+          <span id="hud-phase-text" class="hud-value neon-pink">LOBBY</span>
+        </div>
+      </div>
+
+      <!-- Main Game Canvas Container -->
+      <div class="canvas-wrapper">
+        <canvas id="gameCanvas" width="800" height="800"></canvas>
+        
+        <!-- Big countdown inside Canvas coordinates -->
+        <div id="aiming-countdown" class="aiming-countdown hidden">
+          <h2 id="countdown-number">5</h2>
+          <p class="aiming-subtext">AIM WITH MOUSE OR TOUCH DRAG</p>
+        </div>
+      </div>
+
+      <!-- Feed / Logs overlay -->
+      <div id="elimination-feed" class="elimination-feed">
+        <!-- BumperBot pushed Player 1 out! -->
+      </div>
+    </section>
+  </main>
+
+  <!-- SCREEN 4: GAME OVER MODAL (Overlay) -->
+  <div id="game-over-overlay" class="modal-overlay hidden">
+    <div class="modal-card glass-panel">
+      <div class="trophy-wrapper">
+        <svg class="trophy-svg" viewBox="0 0 24 24" width="64" height="64">
+          <path fill="#ffcc00" d="M12 2c1.1 0 2 .9 2 2v1.2c2.7.4 4.8 2.5 5.2 5.2h.8c1.1 0 2 .9 2 2v2c0 1.1-.9 2-2 2h-.8c-.7 2.4-2.6 4.3-5 4.8V20h3c.6 0 1 .4 1 1s-.4 1-1 1H7c-.6 0-1-.4-1-1s.4-1 1-1h3v-2.8c-2.4-.5-4.3-2.4-5-4.8H4.2c-1.1 0-2-.9-2-2v-2c0-1.1.9-2 2-2h.8C5.4 6.7 7.5 4.6 10.2 4.2V4c0-1.1.9-2 2-2m-6.8 8c-.1.6-.2 1.3-.2 2H4v2h1c0 .7.1 1.4.2 2H5.7c-.4-1.2-.7-2.6-.7-4s.3-2.8.7-4H5.2m13.6 0c.4 1.2.7 2.6.7 4s-.3 2.8-.7 4h.5c.1-.6.2-1.3.2-2h1v-2h-1c0-.7-.1-1.4-.2-2h-.5M12 6c-3.3 0-6 2.7-6 6s2.7 6 6 6 6-2.7 6-6-2.7-6-6-6z"/>
+        </svg>
+      </div>
+      <h2 id="modal-title" class="glow-text">CHAMPION DECLARED</h2>
+      <div id="winner-profile" class="winner-profile">
+        <div id="winner-circle" class="winner-circle"></div>
+        <h3 id="winner-name">Player Name</h3>
+        <p id="winner-stats">Survived the arena clash!</p>
+      </div>
+
+      <div class="modal-actions">
+        <!-- Host Only controls -->
+        <div id="host-modal-controls" class="hidden">
+          <button id="btn-restart-match" class="btn btn-primary pulse-hover">PLAY AGAIN</button>
+        </div>
+        <div id="client-modal-controls">
+          <p class="waiting-host-text">Waiting for Host to initialize next round...</p>
+        </div>
+        <button id="btn-modal-lobby" class="btn btn-secondary">BACK TO LOBBY</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="game.bundle.js"></script>
+</body>
+</html>
