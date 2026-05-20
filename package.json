@@ -6,7 +6,7 @@
   "scripts": {
     "build": "esbuild public/game.js --bundle --format=iife --global-name=ClashUpGame --outfile=public/game.bundle.js",
     "prestart": "npm run build",
-    "start": "node server.js",
+    "start": "node start.js",
     "dev": "npm run build && node --watch server.js"
   },
   "dependencies": {
