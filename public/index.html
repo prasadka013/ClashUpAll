@@ -99,7 +99,7 @@
         <!-- Players List Panel -->
         <div class="lobby-panel glass-panel">
           <div class="panel-header">
-            <h3>CONNECTED PLAYERS (<span id="player-count">0</span>/8)</h3>
+            <h3>CONNECTED PLAYERS (<span id="player-count">0</span>/6)</h3>
           </div>
           <div id="player-list" class="player-list-container">
             <!-- Dynamic elements will be inserted here -->
@@ -112,7 +112,7 @@
             <h3>READY SEQUENCE</h3>
           </div>
           <div class="controls-status">
-            <p class="status-tip">Host can start the game once everyone readies up. Minimum 2 pilots required.</p>
+            <p class="status-tip">Tournament mode: up to 6 pilots. Each round eliminates 2 until one champion remains. Add bots to fill the bracket.</p>
           </div>
           <div class="lobby-action-buttons">
             <button id="btn-ready" class="btn btn-secondary pulse-hover">READY UP</button>
@@ -140,18 +140,27 @@
           <span id="hud-code-text">ABCD</span>
         </div>
         <div class="hud-item">
+          <span class="hud-label">ROUND</span>
+          <span id="hud-round-text" class="hud-value neon-gold">1</span>
+        </div>
+        <div class="hud-item">
           <span class="hud-label">PHASE</span>
           <span id="hud-phase-text" class="hud-value neon-pink">LOBBY</span>
         </div>
       </div>
 
+      <div id="hud-round-banner" class="hud-round-banner hidden">
+        <span id="hud-round-label">ROUND 1</span>
+        <span id="hud-round-sub">6 pilots · eliminate 2</span>
+      </div>
+
       <!-- Main Game Canvas Container -->
       <div class="canvas-wrapper">
-        <canvas id="gameCanvas" width="800" height="800"></canvas>
+        <canvas id="gameCanvas"></canvas>
         
         <!-- Big countdown inside Canvas coordinates -->
         <div id="aiming-countdown" class="aiming-countdown hidden">
-          <h2 id="countdown-number">5</h2>
+          <h2 id="countdown-number">15</h2>
           <p class="aiming-subtext">AIM WITH MOUSE OR TOUCH DRAG</p>
         </div>
       </div>

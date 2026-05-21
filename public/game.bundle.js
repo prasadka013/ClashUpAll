@@ -20080,6 +20080,53 @@ void main() {
       return new _CapsuleGeometry(data.radius, data.length, data.capSegments, data.radialSegments);
     }
   };
+  var CircleGeometry = class _CircleGeometry extends BufferGeometry {
+    constructor(radius = 1, segments = 32, thetaStart = 0, thetaLength = Math.PI * 2) {
+      super();
+      this.type = "CircleGeometry";
+      this.parameters = {
+        radius,
+        segments,
+        thetaStart,
+        thetaLength
+      };
+      segments = Math.max(3, segments);
+      const indices = [];
+      const vertices = [];
+      const normals = [];
+      const uvs = [];
+      const vertex2 = new Vector3();
+      const uv = new Vector2();
+      vertices.push(0, 0, 0);
+      normals.push(0, 0, 1);
+      uvs.push(0.5, 0.5);
+      for (let s = 0, i = 3; s <= segments; s++, i += 3) {
+        const segment = thetaStart + s / segments * thetaLength;
+        vertex2.x = radius * Math.cos(segment);
+        vertex2.y = radius * Math.sin(segment);
+        vertices.push(vertex2.x, vertex2.y, vertex2.z);
+        normals.push(0, 0, 1);
+        uv.x = (vertices[i] / radius + 1) / 2;
+        uv.y = (vertices[i + 1] / radius + 1) / 2;
+        uvs.push(uv.x, uv.y);
+      }
+      for (let i = 1; i <= segments; i++) {
+        indices.push(i, i + 1, 0);
+      }
+      this.setIndex(indices);
+      this.setAttribute("position", new Float32BufferAttribute(vertices, 3));
+      this.setAttribute("normal", new Float32BufferAttribute(normals, 3));
+      this.setAttribute("uv", new Float32BufferAttribute(uvs, 2));
+    }
+    copy(source) {
+      super.copy(source);
+      this.parameters = Object.assign({}, source.parameters);
+      return this;
+    }
+    static fromJSON(data) {
+      return new _CircleGeometry(data.radius, data.segments, data.thetaStart, data.thetaLength);
+    }
+  };
   var CylinderGeometry = class _CylinderGeometry extends BufferGeometry {
     constructor(radiusTop = 1, radiusBottom = 1, height = 1, radialSegments = 32, heightSegments = 1, openEnded = false, thetaStart = 0, thetaLength = Math.PI * 2) {
       super();
@@ -26099,6 +26146,10 @@ void main() {
   var hudAliveCount = document.getElementById("hud-alive-count");
   var hudCodeText = document.getElementById("hud-code-text");
   var hudPhaseText = document.getElementById("hud-phase-text");
+  var hudRoundText = document.getElementById("hud-round-text");
+  var hudRoundBanner = document.getElementById("hud-round-banner");
+  var hudRoundLabel = document.getElementById("hud-round-label");
+  var hudRoundSub = document.getElementById("hud-round-sub");
   var eliminationFeed = document.getElementById("elimination-feed");
   var modalTitle = document.getElementById("modal-title");
   var winnerCircle = document.getElementById("winner-circle");
@@ -26271,16 +26322,27 @@ void main() {
   socket.on("room_updated", (room) => {
     handleRoomUpdate(room);
   });
+  function syncTournamentHud(room) {
+    const round = room.tournamentRound || 1;
+    const remaining = room.tournamentRemaining ?? Object.values(localPlayers).filter((p) => p.inTournament !== false).length;
+    const elimTarget = room.eliminationsNeeded || 2;
+    hudRoundText.innerText = String(round);
+    hudRoundLabel.innerText = `ROUND ${round}`;
+    hudRoundSub.innerText = `${remaining} pilots \xB7 eliminate ${elimTarget}`;
+    hudRoundBanner.classList.remove("hidden");
+  }
   socket.on("aiming_start", (room) => {
     currentPhase = "AIMING";
     currentRoom = room;
     showScreen("game");
     gameOverOverlay.classList.remove("active");
+    gameOverOverlay.classList.add("hidden");
     aimingCountdown.classList.remove("hidden");
     countdownNumber.innerText = room.countdown;
     hudCodeText.innerText = `ROOM: ${room.code}`;
     hudPhaseText.innerText = "AIMING";
     hudPhaseText.className = "hud-value neon-cyan";
+    syncTournamentHud(room);
     localPlayers = {};
     driftTrails = {};
     particles = [];
@@ -26301,12 +26363,24 @@ void main() {
       localPlayers[id].force = force;
     }
   });
+  socket.on("round_ended", ({ round, nextRound, eliminated, remaining, eliminationsNeeded, room }) => {
+    currentRoom = room;
+    currentPhase = "INTERMISSION";
+    hudPhaseText.innerText = "NEXT ROUND";
+    hudPhaseText.className = "hud-value neon-gold";
+    syncTournamentHud({ ...room, tournamentRound: nextRound, tournamentRemaining: remaining, eliminationsNeeded });
+    if (eliminated.length) {
+      addFeedItem(`${eliminated.join(", ")}`, COLORS.pink, `OUT \u2014 ${remaining} remain for Round ${nextRound}`);
+    }
+    showToast(`Round ${round} complete! ${remaining} pilots advance.`);
+  });
   socket.on("battle_start", (room) => {
     currentPhase = "BATTLE";
     currentRoom = room;
     aimingCountdown.classList.add("hidden");
     hudPhaseText.innerText = "BATTLE";
     hudPhaseText.className = "hud-value neon-pink";
+    syncTournamentHud(room);
     room.players.forEach((p) => {
       if (localPlayers[p.id]) {
         localPlayers[p.id].vx = p.vx;
@@ -26324,6 +26398,9 @@ void main() {
         clientPlayer.y = srvPlayer.y;
         clientPlayer.vx = srvPlayer.vx;
         clientPlayer.vy = srvPlayer.vy;
+        if (typeof srvPlayer.inTournament === "boolean") {
+          clientPlayer.inTournament = srvPlayer.inTournament;
+        }
         if (clientPlayer.isAlive && !srvPlayer.isAlive) {
           clientPlayer.isAlive = false;
         }
@@ -26344,8 +26421,9 @@ void main() {
   socket.on("match_ended", ({ winner, room, stats }) => {
     currentPhase = "GAMEOVER";
     currentRoom = room;
-    hudPhaseText.innerText = "GAMEOVER";
+    hudPhaseText.innerText = "CHAMPION";
     hudPhaseText.className = "hud-value neon-cyan";
+    hudRoundBanner.classList.add("hidden");
     room.players.forEach((p) => {
       if (localPlayers[p.id]) {
         localPlayers[p.id].score = p.score;
@@ -26483,15 +26561,16 @@ void main() {
   }
   function updateAliveHUD() {
     if (!currentRoom) return;
-    const total = Object.keys(localPlayers).length;
-    const alive = Object.values(localPlayers).filter((p) => p.isAlive).length;
-    hudAliveCount.innerText = `${alive}/${total}`;
+    const tournament = Object.values(localPlayers).filter((p) => p.inTournament !== false);
+    const alive = tournament.filter((p) => p.isAlive).length;
+    hudAliveCount.innerText = `${alive}/${tournament.length}`;
   }
-  function addFeedItem(name, color) {
+  function addFeedItem(name, color, message) {
     const item = document.createElement("div");
     item.className = "feed-item";
     item.style.borderColor = color;
-    item.innerHTML = `<span style="color: ${color}; font-weight: 800;">${name}</span> crossed boundary & was <span style="color: ${COLORS.pink}; font-weight: 800;">ELIMINATED</span>`;
+    const detail = message || 'crossed boundary & was <span style="color: #ff2a5f; font-weight: 800;">ELIMINATED</span>';
+    item.innerHTML = `<span style="color: ${color}; font-weight: 800;">${name}</span> ${detail}`;
     eliminationFeed.appendChild(item);
     if (eliminationFeed.children.length > 4) {
       eliminationFeed.removeChild(eliminationFeed.firstChild);
@@ -26534,69 +26613,105 @@ void main() {
     renderer.toneMapping = ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.15;
     scene = new Scene();
-    scene.background = new Color(328970);
-    scene.fog = new Fog(328970, 650, 1350);
+    scene.background = new Color(8308976);
+    scene.fog = new Fog(10147061, 700, 1500);
     camera = new PerspectiveCamera(44, 1, 1, 2400);
     raycaster = new Raycaster();
     arenaPlane = new Plane(new Vector3(0, 1, 0), 0);
-    scene.add(new HemisphereLight(12316671, 1179672, 1.35));
-    const keyLight = new DirectionalLight(16777215, 2.2);
-    keyLight.position.set(-240, 520, 260);
+    scene.add(new HemisphereLight(15267583, 6983605, 1.5));
+    const keyLight = new DirectionalLight(16777215, 2.4);
+    keyLight.position.set(-200, 480, 220);
     scene.add(keyLight);
-    const cyanLight = new PointLight(61695, 3800, 780);
-    cyanLight.position.set(-300, 150, -280);
-    scene.add(cyanLight);
-    const pinkLight = new PointLight(16722527, 2600, 720);
-    pinkLight.position.set(310, 120, 260);
-    scene.add(pinkLight);
-    buildArena();
+    const rimLight = new PointLight(11066879, 3200, 900);
+    rimLight.position.set(280, 180, -220);
+    scene.add(rimLight);
+    buildIceArena();
     resizeThree();
+    fitArenaToView();
+    cameraDistance = targetCameraDistance;
     loadRobotModel();
     requestAnimationFrame(render3D);
   }
-  function buildArena() {
-    const floorMaterial = new MeshStandardMaterial({
-      color: 1118751,
-      metalness: 0.35,
-      roughness: 0.48,
-      emissive: 132106,
+  function buildIceArena() {
+    const iceFloorMat = new MeshStandardMaterial({
+      color: 12118271,
+      metalness: 0.15,
+      roughness: 0.22,
+      emissive: 4886728,
+      emissiveIntensity: 0.08,
       side: DoubleSide
     });
-    const floor = new Mesh(new CylinderGeometry(ARENA_RADIUS, ARENA_RADIUS, 16, 160), floorMaterial);
+    const floor = new Mesh(new CylinderGeometry(ARENA_RADIUS, ARENA_RADIUS, 18, 160), iceFloorMat);
     floor.position.y = -10;
     scene.add(floor);
-    const grid = new GridHelper(ARENA_RADIUS * 2, 12, 1133398, 1581113);
-    grid.position.y = 0.5;
+    const grid = new GridHelper(ARENA_RADIUS * 2, 24, 8308968, 10409200);
+    grid.position.y = 1;
     grid.material.transparent = true;
-    grid.material.opacity = 0.23;
+    grid.material.opacity = 0.45;
     scene.add(grid);
+    const spawnGlow = new Mesh(
+      new TorusGeometry(42, 3, 10, 48),
+      new MeshBasicMaterial({ color: 6737151, transparent: true, opacity: 0.55 })
+    );
+    spawnGlow.rotation.x = Math.PI / 2;
+    spawnGlow.position.y = 4;
+    scene.add(spawnGlow);
     for (let radius = 100; radius <= ARENA_RADIUS; radius += 100) {
       const ring = new Mesh(
-        new TorusGeometry(radius, radius === ARENA_RADIUS ? 4 : 1.1, 12, 180),
+        new TorusGeometry(radius, radius === ARENA_RADIUS ? 5 : 1.2, 12, 180),
         new MeshBasicMaterial({
-          color: radius === ARENA_RADIUS ? 61695 : 3232093,
+          color: radius === ARENA_RADIUS ? 8969727 : 13167871,
           transparent: true,
-          opacity: radius === ARENA_RADIUS ? 0.88 : 0.2
+          opacity: radius === ARENA_RADIUS ? 0.95 : 0.28
         })
       );
       ring.rotation.x = Math.PI / 2;
-      ring.position.y = radius === ARENA_RADIUS ? 9 : 3;
+      ring.position.y = radius === ARENA_RADIUS ? 10 : 3;
       scene.add(ring);
     }
-    const dangerRing = new Mesh(
-      new TorusGeometry(ARENA_RADIUS + 4, 2.5, 10, 180),
-      new MeshBasicMaterial({ color: 16722527, transparent: true, opacity: 0.32 })
+    const edgeRing = new Mesh(
+      new TorusGeometry(ARENA_RADIUS + 5, 3, 10, 180),
+      new MeshBasicMaterial({ color: 16777215, transparent: true, opacity: 0.5 })
     );
-    dangerRing.rotation.x = Math.PI / 2;
-    dangerRing.position.y = 13;
-    scene.add(dangerRing);
-    const backdrop = new Mesh(
-      new PlaneGeometry(1500, 1500),
-      new MeshBasicMaterial({ color: 328970, transparent: true, opacity: 0.72 })
+    edgeRing.rotation.x = Math.PI / 2;
+    edgeRing.position.y = 12;
+    scene.add(edgeRing);
+    const iceWallMat = new MeshStandardMaterial({
+      color: 15268095,
+      metalness: 0.05,
+      roughness: 0.35,
+      transparent: true,
+      opacity: 0.88
+    });
+    const wallCount = 28;
+    for (let i = 0; i < wallCount; i++) {
+      const angle = i / wallCount * Math.PI * 2;
+      const block = new Mesh(new BoxGeometry(36, 28, 36), iceWallMat);
+      block.position.set(
+        Math.cos(angle) * (ARENA_RADIUS + 52),
+        12,
+        Math.sin(angle) * (ARENA_RADIUS + 52)
+      );
+      block.rotation.y = -angle;
+      scene.add(block);
+    }
+    const mountainMat = new MeshStandardMaterial({ color: 16055295, roughness: 0.9, metalness: 0 });
+    const mountainShadow = new MeshStandardMaterial({ color: 12966122, roughness: 0.95 });
+    for (let i = 0; i < 10; i++) {
+      const angle = i / 10 * Math.PI * 2 + 0.2;
+      const dist = ARENA_RADIUS + 180 + i % 3 * 40;
+      const base = new Mesh(new ConeGeometry(90 + i % 4 * 20, 120 + i % 3 * 30, 5), i % 2 ? mountainMat : mountainShadow);
+      base.position.set(Math.cos(angle) * dist, 40, Math.sin(angle) * dist);
+      base.rotation.y = angle;
+      scene.add(base);
+    }
+    const waterPlane = new Mesh(
+      new CircleGeometry(ARENA_RADIUS + 220, 64),
+      new MeshStandardMaterial({ color: 6207720, roughness: 0.1, metalness: 0.2, transparent: true, opacity: 0.55 })
     );
-    backdrop.rotation.x = -Math.PI / 2;
-    backdrop.position.y = -22;
-    scene.add(backdrop);
+    waterPlane.rotation.x = -Math.PI / 2;
+    waterPlane.position.y = -18;
+    scene.add(waterPlane);
   }
   function loadRobotModel() {
     const loader = new GLTFLoader();
@@ -26773,9 +26888,10 @@ void main() {
         replaceBotBody(view, player);
       }
       const pos = serverToWorld(player.x, player.y);
+      const inTournament = player.inTournament !== false;
       view.group.position.lerp(new Vector3(pos.x, 0, pos.z), currentPhase === "BATTLE" ? 0.58 : 1);
-      view.group.visible = true;
-      view.group.scale.setScalar(player.isAlive ? 1 : 0.72);
+      view.group.visible = inTournament;
+      view.group.scale.setScalar(inTournament && player.isAlive ? 1 : 0.55);
       view.halo.material.opacity = player.isAlive ? 0.72 + Math.sin(performance.now() * 6e-3) * 0.13 : 0.16;
       const speed = Math.hypot(player.vx || 0, player.vy || 0);
       const faceAngle = speed > 0.15 ? Math.atan2(player.vy, player.vx) : player.angle;
@@ -26798,8 +26914,15 @@ void main() {
     arrow.userData.shaft.scale.set(1, length, 1);
     arrow.userData.shaft.position.z = length / 2;
     arrow.userData.head.position.z = length + 8;
-    const direction = new Vector3(Math.cos(player.angle), 0, Math.sin(player.angle));
-    arrow.lookAt(direction.x, 22, direction.z);
+    view.group.updateWorldMatrix(true, false);
+    const worldPos = new Vector3();
+    arrow.getWorldPosition(worldPos);
+    const target = new Vector3(
+      worldPos.x + Math.cos(player.angle),
+      worldPos.y,
+      worldPos.z + Math.sin(player.angle)
+    );
+    arrow.lookAt(target);
   }
   function updateTrail(view, player, pos) {
     if (currentPhase === "BATTLE" && player.isAlive && Math.hypot(player.vx || 0, player.vy || 0) > 0.2) {
@@ -26872,13 +26995,27 @@ void main() {
     updateEffects();
     renderer.render(scene, camera);
   }
+  function fitArenaToView() {
+    const width = canvas.clientWidth || window.innerWidth;
+    const height = canvas.clientHeight || window.innerHeight;
+    const aspect2 = width / height;
+    const vFovRad = camera.fov * Math.PI / 180;
+    const arenaSpan = ARENA_RADIUS * 2.15;
+    const distForHeight = arenaSpan / 2 / Math.tan(vFovRad / 2);
+    const hFovRad = 2 * Math.atan(Math.tan(vFovRad / 2) * aspect2);
+    const distForWidth = arenaSpan / 2 / Math.tan(hFovRad / 2);
+    const pitch = Math.max(0.35, targetCameraPitch);
+    const fitted = Math.max(distForHeight, distForWidth) / Math.sin(pitch) * 1.06;
+    targetCameraDistance = Math.max(480, Math.min(1050, fitted));
+  }
   function resizeThree() {
-    const width = canvas.clientWidth || 800;
-    const height = canvas.clientHeight || 800;
+    const width = canvas.clientWidth || window.innerWidth;
+    const height = canvas.clientHeight || window.innerHeight;
     if (canvas.width !== Math.floor(width * renderer.getPixelRatio()) || canvas.height !== Math.floor(height * renderer.getPixelRatio())) {
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+      fitArenaToView();
     }
   }
   function pointerFromEvent(e) {

@@ -39,6 +39,10 @@ const countdownNumber = document.getElementById('countdown-number');
 const hudAliveCount = document.getElementById('hud-alive-count');
 const hudCodeText = document.getElementById('hud-code-text');
 const hudPhaseText = document.getElementById('hud-phase-text');
+const hudRoundText = document.getElementById('hud-round-text');
+const hudRoundBanner = document.getElementById('hud-round-banner');
+const hudRoundLabel = document.getElementById('hud-round-label');
+const hudRoundSub = document.getElementById('hud-round-sub');
 const eliminationFeed = document.getElementById('elimination-feed');
 
 // Modal Elements
@@ -265,6 +269,16 @@ socket.on('room_updated', (room) => {
   handleRoomUpdate(room);
 });
 
+function syncTournamentHud(room) {
+  const round = room.tournamentRound || 1;
+  const remaining = room.tournamentRemaining ?? Object.values(localPlayers).filter(p => p.inTournament !== false).length;
+  const elimTarget = room.eliminationsNeeded || 2;
+  hudRoundText.innerText = String(round);
+  hudRoundLabel.innerText = `ROUND ${round}`;
+  hudRoundSub.innerText = `${remaining} pilots · eliminate ${elimTarget}`;
+  hudRoundBanner.classList.remove('hidden');
+}
+
 socket.on('aiming_start', (room) => {
   currentPhase = 'AIMING';
   currentRoom = room;
@@ -272,6 +286,7 @@ socket.on('aiming_start', (room) => {
   // Transition UI
   showScreen('game');
   gameOverOverlay.classList.remove('active');
+  gameOverOverlay.classList.add('hidden');
   aimingCountdown.classList.remove('hidden');
   countdownNumber.innerText = room.countdown;
 
@@ -279,6 +294,7 @@ socket.on('aiming_start', (room) => {
   hudCodeText.innerText = `ROOM: ${room.code}`;
   hudPhaseText.innerText = 'AIMING';
   hudPhaseText.className = 'hud-value neon-cyan';
+  syncTournamentHud(room);
 
   // Initialize client side players copy
   localPlayers = {};
@@ -306,6 +322,19 @@ socket.on('player_aim_updated', ({ id, angle, force }) => {
   }
 });
 
+socket.on('round_ended', ({ round, nextRound, eliminated, remaining, eliminationsNeeded, room }) => {
+  currentRoom = room;
+  currentPhase = 'INTERMISSION';
+  hudPhaseText.innerText = 'NEXT ROUND';
+  hudPhaseText.className = 'hud-value neon-gold';
+  syncTournamentHud({ ...room, tournamentRound: nextRound, tournamentRemaining: remaining, eliminationsNeeded });
+
+  if (eliminated.length) {
+    addFeedItem(`${eliminated.join(', ')}`, COLORS.pink, `OUT — ${remaining} remain for Round ${nextRound}`);
+  }
+  showToast(`Round ${round} complete! ${remaining} pilots advance.`);
+});
+
 socket.on('battle_start', (room) => {
   currentPhase = 'BATTLE';
   currentRoom = room;
@@ -313,6 +342,7 @@ socket.on('battle_start', (room) => {
 
   hudPhaseText.innerText = 'BATTLE';
   hudPhaseText.className = 'hud-value neon-pink';
+  syncTournamentHud(room);
 
   // Apply final states from server
   room.players.forEach(p => {
@@ -335,7 +365,10 @@ socket.on('physics_update', ({ players, collisions }) => {
       clientPlayer.y = srvPlayer.y;
       clientPlayer.vx = srvPlayer.vx;
       clientPlayer.vy = srvPlayer.vy;
-      
+      if (typeof srvPlayer.inTournament === 'boolean') {
+        clientPlayer.inTournament = srvPlayer.inTournament;
+      }
+
       if (clientPlayer.isAlive && !srvPlayer.isAlive) {
         // Just got eliminated locally
         clientPlayer.isAlive = false;
@@ -366,8 +399,9 @@ socket.on('player_eliminated', ({ id, name, color, x, y }) => {
 socket.on('match_ended', ({ winner, room, stats }) => {
   currentPhase = 'GAMEOVER';
   currentRoom = room;
-  hudPhaseText.innerText = 'GAMEOVER';
+  hudPhaseText.innerText = 'CHAMPION';
   hudPhaseText.className = 'hud-value neon-cyan';
+  hudRoundBanner.classList.add('hidden');
   
   // Update scores in lobby data
   room.players.forEach(p => {
@@ -546,17 +580,17 @@ function displayGameOver(winner, stats = {}) {
 
 function updateAliveHUD() {
   if (!currentRoom) return;
-  const total = Object.keys(localPlayers).length;
-  const alive = Object.values(localPlayers).filter(p => p.isAlive).length;
-  hudAliveCount.innerText = `${alive}/${total}`;
+  const tournament = Object.values(localPlayers).filter(p => p.inTournament !== false);
+  const alive = tournament.filter(p => p.isAlive).length;
+  hudAliveCount.innerText = `${alive}/${tournament.length}`;
 }
 
-// Append elimination notifications
-function addFeedItem(name, color) {
+function addFeedItem(name, color, message) {
   const item = document.createElement('div');
   item.className = 'feed-item';
   item.style.borderColor = color;
-  item.innerHTML = `<span style="color: ${color}; font-weight: 800;">${name}</span> crossed boundary & was <span style="color: ${COLORS.pink}; font-weight: 800;">ELIMINATED</span>`;
+  const detail = message || 'crossed boundary & was <span style="color: #ff2a5f; font-weight: 800;">ELIMINATED</span>';
+  item.innerHTML = `<span style="color: ${color}; font-weight: 800;">${name}</span> ${detail}`;
   
   eliminationFeed.appendChild(item);
   
@@ -610,81 +644,119 @@ function initThreeScene() {
   renderer.toneMappingExposure = 1.15;
 
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x05050a);
-  scene.fog = new THREE.Fog(0x05050a, 650, 1350);
+  scene.background = new THREE.Color(0x7ec8f0);
+  scene.fog = new THREE.Fog(0x9ad4f5, 700, 1500);
 
   camera = new THREE.PerspectiveCamera(44, 1, 1, 2400);
   raycaster = new THREE.Raycaster();
   arenaPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 
-  scene.add(new THREE.HemisphereLight(0xbbefff, 0x120018, 1.35));
+  scene.add(new THREE.HemisphereLight(0xe8f6ff, 0x6a8fb5, 1.5));
 
-  const keyLight = new THREE.DirectionalLight(0xffffff, 2.2);
-  keyLight.position.set(-240, 520, 260);
+  const keyLight = new THREE.DirectionalLight(0xffffff, 2.4);
+  keyLight.position.set(-200, 480, 220);
   scene.add(keyLight);
 
-  const cyanLight = new THREE.PointLight(0x00f0ff, 3800, 780);
-  cyanLight.position.set(-300, 150, -280);
-  scene.add(cyanLight);
+  const rimLight = new THREE.PointLight(0xa8ddff, 3200, 900);
+  rimLight.position.set(280, 180, -220);
+  scene.add(rimLight);
 
-  const pinkLight = new THREE.PointLight(0xff2a5f, 2600, 720);
-  pinkLight.position.set(310, 120, 260);
-  scene.add(pinkLight);
-
-  buildArena();
+  buildIceArena();
   resizeThree();
+  fitArenaToView();
+  cameraDistance = targetCameraDistance;
   loadRobotModel();
   requestAnimationFrame(render3D);
 }
 
-function buildArena() {
-  const floorMaterial = new THREE.MeshStandardMaterial({
-    color: 0x11121f,
-    metalness: 0.35,
-    roughness: 0.48,
-    emissive: 0x02040a,
+function buildIceArena() {
+  const iceFloorMat = new THREE.MeshStandardMaterial({
+    color: 0xb8e8ff,
+    metalness: 0.15,
+    roughness: 0.22,
+    emissive: 0x4a90c8,
+    emissiveIntensity: 0.08,
     side: THREE.DoubleSide
   });
 
-  const floor = new THREE.Mesh(new THREE.CylinderGeometry(ARENA_RADIUS, ARENA_RADIUS, 16, 160), floorMaterial);
+  const floor = new THREE.Mesh(new THREE.CylinderGeometry(ARENA_RADIUS, ARENA_RADIUS, 18, 160), iceFloorMat);
   floor.position.y = -10;
   scene.add(floor);
 
-  const grid = new THREE.GridHelper(ARENA_RADIUS * 2, 12, 0x114b56, 0x182039);
-  grid.position.y = 0.5;
+  const grid = new THREE.GridHelper(ARENA_RADIUS * 2, 24, 0x7ec8e8, 0x9ed4f0);
+  grid.position.y = 1;
   grid.material.transparent = true;
-  grid.material.opacity = 0.23;
+  grid.material.opacity = 0.45;
   scene.add(grid);
+
+  const spawnGlow = new THREE.Mesh(
+    new THREE.TorusGeometry(42, 3, 10, 48),
+    new THREE.MeshBasicMaterial({ color: 0x66ccff, transparent: true, opacity: 0.55 })
+  );
+  spawnGlow.rotation.x = Math.PI / 2;
+  spawnGlow.position.y = 4;
+  scene.add(spawnGlow);
 
   for (let radius = 100; radius <= ARENA_RADIUS; radius += 100) {
     const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(radius, radius === ARENA_RADIUS ? 4 : 1.1, 12, 180),
+      new THREE.TorusGeometry(radius, radius === ARENA_RADIUS ? 5 : 1.2, 12, 180),
       new THREE.MeshBasicMaterial({
-        color: radius === ARENA_RADIUS ? 0x00f0ff : 0x31515d,
+        color: radius === ARENA_RADIUS ? 0x88ddff : 0xc8ecff,
         transparent: true,
-        opacity: radius === ARENA_RADIUS ? 0.88 : 0.2
+        opacity: radius === ARENA_RADIUS ? 0.95 : 0.28
       })
     );
     ring.rotation.x = Math.PI / 2;
-    ring.position.y = radius === ARENA_RADIUS ? 9 : 3;
+    ring.position.y = radius === ARENA_RADIUS ? 10 : 3;
     scene.add(ring);
   }
 
-  const dangerRing = new THREE.Mesh(
-    new THREE.TorusGeometry(ARENA_RADIUS + 4, 2.5, 10, 180),
-    new THREE.MeshBasicMaterial({ color: 0xff2a5f, transparent: true, opacity: 0.32 })
+  const edgeRing = new THREE.Mesh(
+    new THREE.TorusGeometry(ARENA_RADIUS + 5, 3, 10, 180),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 })
   );
-  dangerRing.rotation.x = Math.PI / 2;
-  dangerRing.position.y = 13;
-  scene.add(dangerRing);
+  edgeRing.rotation.x = Math.PI / 2;
+  edgeRing.position.y = 12;
+  scene.add(edgeRing);
 
-  const backdrop = new THREE.Mesh(
-    new THREE.PlaneGeometry(1500, 1500),
-    new THREE.MeshBasicMaterial({ color: 0x05050a, transparent: true, opacity: 0.72 })
+  const iceWallMat = new THREE.MeshStandardMaterial({
+    color: 0xe8f8ff,
+    metalness: 0.05,
+    roughness: 0.35,
+    transparent: true,
+    opacity: 0.88
+  });
+  const wallCount = 28;
+  for (let i = 0; i < wallCount; i++) {
+    const angle = (i / wallCount) * Math.PI * 2;
+    const block = new THREE.Mesh(new THREE.BoxGeometry(36, 28, 36), iceWallMat);
+    block.position.set(
+      Math.cos(angle) * (ARENA_RADIUS + 52),
+      12,
+      Math.sin(angle) * (ARENA_RADIUS + 52)
+    );
+    block.rotation.y = -angle;
+    scene.add(block);
+  }
+
+  const mountainMat = new THREE.MeshStandardMaterial({ color: 0xf4fbff, roughness: 0.9, metalness: 0 });
+  const mountainShadow = new THREE.MeshStandardMaterial({ color: 0xc5d8ea, roughness: 0.95 });
+  for (let i = 0; i < 10; i++) {
+    const angle = (i / 10) * Math.PI * 2 + 0.2;
+    const dist = ARENA_RADIUS + 180 + (i % 3) * 40;
+    const base = new THREE.Mesh(new THREE.ConeGeometry(90 + (i % 4) * 20, 120 + (i % 3) * 30, 5), i % 2 ? mountainMat : mountainShadow);
+    base.position.set(Math.cos(angle) * dist, 40, Math.sin(angle) * dist);
+    base.rotation.y = angle;
+    scene.add(base);
+  }
+
+  const waterPlane = new THREE.Mesh(
+    new THREE.CircleGeometry(ARENA_RADIUS + 220, 64),
+    new THREE.MeshStandardMaterial({ color: 0x5eb8e8, roughness: 0.1, metalness: 0.2, transparent: true, opacity: 0.55 })
   );
-  backdrop.rotation.x = -Math.PI / 2;
-  backdrop.position.y = -22;
-  scene.add(backdrop);
+  waterPlane.rotation.x = -Math.PI / 2;
+  waterPlane.position.y = -18;
+  scene.add(waterPlane);
 }
 
 function loadRobotModel() {
@@ -885,9 +957,10 @@ function updatePlayerViews(delta) {
     }
 
     const pos = serverToWorld(player.x, player.y);
+    const inTournament = player.inTournament !== false;
     view.group.position.lerp(new THREE.Vector3(pos.x, 0, pos.z), currentPhase === 'BATTLE' ? 0.58 : 1);
-    view.group.visible = true;
-    view.group.scale.setScalar(player.isAlive ? 1 : 0.72);
+    view.group.visible = inTournament;
+    view.group.scale.setScalar(inTournament && player.isAlive ? 1 : 0.55);
     view.halo.material.opacity = player.isAlive ? 0.72 + Math.sin(performance.now() * 0.006) * 0.13 : 0.16;
 
     const speed = Math.hypot(player.vx || 0, player.vy || 0);
@@ -917,8 +990,15 @@ function updateAimArrow(view, player) {
   arrow.userData.shaft.position.z = length / 2;
   arrow.userData.head.position.z = length + 8;
 
-  const direction = new THREE.Vector3(Math.cos(player.angle), 0, Math.sin(player.angle));
-  arrow.lookAt(direction.x, 22, direction.z);
+  view.group.updateWorldMatrix(true, false);
+  const worldPos = new THREE.Vector3();
+  arrow.getWorldPosition(worldPos);
+  const target = new THREE.Vector3(
+    worldPos.x + Math.cos(player.angle),
+    worldPos.y,
+    worldPos.z + Math.sin(player.angle)
+  );
+  arrow.lookAt(target);
 }
 
 function updateTrail(view, player, pos) {
@@ -1001,13 +1081,28 @@ function render3D() {
   renderer.render(scene, camera);
 }
 
+function fitArenaToView() {
+  const width = canvas.clientWidth || window.innerWidth;
+  const height = canvas.clientHeight || window.innerHeight;
+  const aspect = width / height;
+  const vFovRad = (camera.fov * Math.PI) / 180;
+  const arenaSpan = ARENA_RADIUS * 2.15;
+  const distForHeight = (arenaSpan / 2) / Math.tan(vFovRad / 2);
+  const hFovRad = 2 * Math.atan(Math.tan(vFovRad / 2) * aspect);
+  const distForWidth = (arenaSpan / 2) / Math.tan(hFovRad / 2);
+  const pitch = Math.max(0.35, targetCameraPitch);
+  const fitted = Math.max(distForHeight, distForWidth) / Math.sin(pitch) * 1.06;
+  targetCameraDistance = Math.max(480, Math.min(1050, fitted));
+}
+
 function resizeThree() {
-  const width = canvas.clientWidth || 800;
-  const height = canvas.clientHeight || 800;
+  const width = canvas.clientWidth || window.innerWidth;
+  const height = canvas.clientHeight || window.innerHeight;
   if (canvas.width !== Math.floor(width * renderer.getPixelRatio()) || canvas.height !== Math.floor(height * renderer.getPixelRatio())) {
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
+    fitArenaToView();
   }
 }
 

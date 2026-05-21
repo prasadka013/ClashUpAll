@@ -24,9 +24,14 @@ const ARENA_Y = 400;
 const ARENA_RADIUS = 300;
 const PLAYER_RADIUS = 20;
 const SPAWN_RADIUS = 120; // Radius of circle where players spawn in the center
-const BASE_MAX_VELOCITY = 15; // Max speed for maximum launch force
-const FRICTION = 0.985; // Damping factor per physics tick
-const BOUNCE_RESTITUTION = 1.15; // Restitution coefficient (elasticity > 1.0 for high energy collisions!)
+const BASE_MAX_VELOCITY = 9; // Max launch speed (lower = gentler openings)
+const MAX_BATTLE_SPEED = 11; // Hard cap while sliding after hits
+const FRICTION = 0.972; // Stronger damping per tick
+const BOUNCE_RESTITUTION = 0.72; // Softer bounces (no energy gain on impact)
+const COLLISION_IMPULSE_SCALE = 0.38; // Extra dampening on player-vs-player hits
+const AIM_COUNTDOWN_SECONDS = 15;
+const ROUND_INTERMISSION_MS = 4000;
+const TARGET_TOURNAMENT_SIZE = 6;
 
 // Rooms state store
 // Room Code -> { code, players: { socketId: playerState }, gameState: 'LOBBY'|'AIMING'|'BATTLE'|'GAMEOVER', countdown, timerId, physicsIntervalId, battleTicks }
@@ -49,14 +54,169 @@ function generateRoomCode() {
 const BOT_NAMES = ['BumperBot', 'SlamMaster', 'CurlingKing', 'DriftDroid', 'BouncyBoy', 'ApexPusher', 'TurboAI', 'Orbiteer'];
 const BOT_COLORS = ['#ff2a5f', '#00f0ff', '#39ff14', '#ffcc00', '#8a2be2', '#ff5722', '#e91e63', '#00bcd4'];
 
+function getRoundEliminationTarget(activeCount) {
+  if (activeCount <= 1) return 0;
+  if (activeCount === 2) return 1;
+  if (activeCount === 3) return 2;
+  return 2;
+}
+
+function clampPlayerVelocity(player, maxSpeed = MAX_BATTLE_SPEED) {
+  const speed = Math.hypot(player.vx, player.vy);
+  if (speed > maxSpeed) {
+    player.vx = (player.vx / speed) * maxSpeed;
+    player.vy = (player.vy / speed) * maxSpeed;
+  }
+}
+
+function getTournamentPlayers(room) {
+  return Object.values(room.players).filter(p => p.inTournament);
+}
+
+function spawnTournamentPlayers(room) {
+  const competitors = getTournamentPlayers(room);
+  const numPlayers = competitors.length;
+  competitors.forEach((player, index) => {
+    const angle = (index * 2 * Math.PI) / numPlayers;
+    player.x = ARENA_X + Math.cos(angle) * SPAWN_RADIUS;
+    player.y = ARENA_Y + Math.sin(angle) * SPAWN_RADIUS;
+    player.vx = 0;
+    player.vy = 0;
+    player.isAlive = true;
+    player.angle = angle + Math.PI;
+    player.force = 0.5;
+    player.maxSpeed = 0;
+    player.eliminatedAtTick = null;
+  });
+}
+
+function initializeTournament(room) {
+  const players = Object.values(room.players);
+  room.tournamentRound = 1;
+  players.forEach(player => {
+    player.inTournament = true;
+    player.knockouts = 0;
+  });
+  room.roundAliveCount = players.length;
+  room.eliminationsNeeded = getRoundEliminationTarget(room.roundAliveCount);
+}
+
+function forceEliminateFurthest(room, count) {
+  const roomCode = room.code;
+  const alive = getTournamentPlayers(room).filter(p => p.isAlive);
+  const sorted = alive
+    .map(p => ({
+      player: p,
+      dist: Math.hypot(p.x - ARENA_X, p.y - ARENA_Y)
+    }))
+    .sort((a, b) => b.dist - a.dist);
+
+  sorted.slice(0, count).forEach(({ player }) => {
+    if (!player.isAlive) return;
+    player.isAlive = false;
+    player.vx = 0;
+    player.vy = 0;
+    player.eliminatedAtTick = room.battleTicks;
+    io.to(roomCode).emit('player_eliminated', {
+      id: player.id,
+      name: player.name,
+      color: player.color,
+      x: player.x,
+      y: player.y
+    });
+  });
+}
+
+function beginRoundAiming(roomCode) {
+  const room = rooms[roomCode];
+  if (!room) return;
+
+  const competitors = getTournamentPlayers(room);
+  if (competitors.length <= 1) {
+    endMatch(roomCode, competitors[0] || null);
+    return;
+  }
+
+  room.gameState = 'AIMING';
+  room.countdown = AIM_COUNTDOWN_SECONDS;
+  room.battleTicks = 0;
+  room.stats = { collisions: 0 };
+  room.roundAliveCount = competitors.length;
+  room.eliminationsNeeded = getRoundEliminationTarget(room.roundAliveCount);
+
+  spawnTournamentPlayers(room);
+  io.to(roomCode).emit('aiming_start', getRoomPayload(room));
+
+  if (room.timerId) clearInterval(room.timerId);
+  room.timerId = setInterval(() => {
+    room.countdown--;
+    if (room.countdown > 0) {
+      io.to(roomCode).emit('countdown_tick', { countdown: room.countdown });
+    } else {
+      clearInterval(room.timerId);
+      room.timerId = null;
+      runBotAI(room);
+      room.gameState = 'BATTLE';
+      startPhysicsLoop(roomCode);
+    }
+  }, 1000);
+}
+
+function endBattleRound(roomCode) {
+  const room = rooms[roomCode];
+  if (!room) return;
+
+  if (room.physicsIntervalId) {
+    clearInterval(room.physicsIntervalId);
+    room.physicsIntervalId = null;
+  }
+
+  const competitors = getTournamentPlayers(room);
+  competitors.forEach(player => {
+    if (!player.isAlive) {
+      player.inTournament = false;
+    }
+  });
+
+  const remaining = getTournamentPlayers(room);
+  const eliminatedNames = competitors.filter(p => !p.inTournament).map(p => p.name);
+
+  if (remaining.length <= 1) {
+    const winner = remaining[0] || null;
+    if (winner) winner.score += 1;
+    endMatch(roomCode, winner);
+    return;
+  }
+
+  room.tournamentRound += 1;
+  io.to(roomCode).emit('round_ended', {
+    round: room.tournamentRound - 1,
+    nextRound: room.tournamentRound,
+    eliminated: eliminatedNames,
+    remaining: remaining.length,
+    eliminationsNeeded: getRoundEliminationTarget(remaining.length),
+    room: getRoomPayload(room)
+  });
+
+  if (room.intermissionTimeoutId) clearTimeout(room.intermissionTimeoutId);
+  room.intermissionTimeoutId = setTimeout(() => {
+    room.intermissionTimeoutId = null;
+    beginRoundAiming(roomCode);
+  }, ROUND_INTERMISSION_MS);
+}
+
 // Helper to get room state clean of socket instances for sending to client
 function getRoomPayload(room) {
   if (!room) return null;
+  const tournamentRemaining = getTournamentPlayers(room).length;
   return {
     code: room.code,
     gameState: room.gameState,
     countdown: room.countdown,
     stats: room.stats,
+    tournamentRound: room.tournamentRound || 1,
+    eliminationsNeeded: room.eliminationsNeeded || 0,
+    tournamentRemaining,
     players: Object.values(room.players).map(p => ({
       id: p.id,
       name: p.name,
@@ -65,6 +225,7 @@ function getRoomPayload(room) {
       isHost: p.isHost,
       isBot: p.isBot,
       isAlive: p.isAlive,
+      inTournament: p.inTournament !== false,
       x: p.x,
       y: p.y,
       vx: p.vx,
@@ -93,12 +254,12 @@ function startPhysicsLoop(roomCode) {
     clearInterval(room.physicsIntervalId);
   }
 
-  // Set initial launch velocities for all players based on their chosen angle & force
-  Object.values(room.players).forEach(player => {
+  // Set initial launch velocities for tournament competitors
+  getTournamentPlayers(room).forEach(player => {
     if (player.isAlive) {
-      // Force is normalized 0 to 1
       player.vx = Math.cos(player.angle) * player.force * BASE_MAX_VELOCITY;
       player.vy = Math.sin(player.angle) * player.force * BASE_MAX_VELOCITY;
+      clampPlayerVelocity(player);
       player.maxSpeed = Math.max(player.maxSpeed || 0, Math.hypot(player.vx, player.vy));
     }
   });
@@ -117,7 +278,7 @@ function updatePhysics(roomCode) {
   if (!room || room.gameState !== 'BATTLE') return;
 
   const players = Object.values(room.players);
-  const alivePlayers = players.filter(p => p.isAlive);
+  const alivePlayers = players.filter(p => p.inTournament && p.isAlive);
   room.battleTicks = (room.battleTicks || 0) + 1;
 
   // 1. Update positions and apply friction
@@ -125,11 +286,10 @@ function updatePhysics(roomCode) {
     p.x += p.vx;
     p.y += p.vy;
 
-    // Apply sliding friction
     p.vx *= FRICTION;
     p.vy *= FRICTION;
+    clampPlayerVelocity(p);
 
-    // Zero out velocity if incredibly slow to stop drifting forever
     if (Math.hypot(p.vx, p.vy) < 0.05) {
       p.vx = 0;
       p.vy = 0;
@@ -172,13 +332,14 @@ function updatePhysics(roomCode) {
         if (velAlongNormal < 0) {
           // Calculate impulse scalar
           // Since mass of both players is equal (1.0), reduced mass is 0.5
-          const impulse = -(1 + BOUNCE_RESTITUTION) * velAlongNormal * 0.5;
+          const impulse = -(1 + BOUNCE_RESTITUTION) * velAlongNormal * 0.5 * COLLISION_IMPULSE_SCALE;
 
-          // Apply impulse to each player
           p1.vx -= impulse * nx;
           p1.vy -= impulse * ny;
           p2.vx += impulse * nx;
           p2.vy += impulse * ny;
+          clampPlayerVelocity(p1);
+          clampPlayerVelocity(p2);
 
           // Save collision event data for clients to render particle impact sparks
           collisions.push({
@@ -228,33 +389,42 @@ function updatePhysics(roomCode) {
     }
   });
 
-  // 4. Check for Winner/Round End
-  const survivors = players.filter(p => p.isAlive);
-  if (survivors.length === 1 && players.length > 1) {
-    // We have a single winner!
-    const winner = survivors[0];
-    winner.score += 1;
-    endMatch(roomCode, winner);
-  } else if (survivors.length === 0) {
-    // Simultaneous elimination of all remaining players: Draw!
+  // 4. Tournament round progression (eliminate N per round until one champion)
+  const tournamentAlive = getTournamentPlayers(room).filter(p => p.isAlive);
+  const eliminatedThisRound = room.roundAliveCount - tournamentAlive.length;
+
+  if (eliminatedThisRound >= room.eliminationsNeeded) {
+    endBattleRound(roomCode);
+    return;
+  }
+
+  if (tournamentAlive.length === 0) {
     endMatch(roomCode, null);
-  } else if (survivors.length === 1 && players.length === 1) {
-    // Single player sandbox, winner is themselves when they stay inside
-    // (We don't immediately end the match unless they choose to, or we let them drift to stop)
-    if (Math.hypot(survivors[0].vx, survivors[0].vy) === 0) {
-      const winner = survivors[0];
-      winner.score += 1;
-      endMatch(roomCode, winner);
+    return;
+  }
+
+  if (
+    tournamentAlive.length > 1 &&
+    tournamentAlive.every(p => Math.hypot(p.vx, p.vy) === 0) &&
+    room.battleTicks > 150
+  ) {
+    const stillNeeded = room.eliminationsNeeded - eliminatedThisRound;
+    if (stillNeeded > 0) {
+      forceEliminateFurthest(room, stillNeeded);
+      const afterForced = getTournamentPlayers(room).filter(p => p.isAlive).length;
+      if (room.roundAliveCount - afterForced >= room.eliminationsNeeded) {
+        endBattleRound(roomCode);
+        return;
+      }
     }
-  } else if (survivors.length > 1 && alivePlayers.every(p => Math.hypot(p.vx, p.vy) === 0) && room.battleTicks > 90) {
-    // If everyone has settled without leaving the arena, award the round to the player closest to center.
-    const winner = survivors.reduce((best, player) => {
-      const bestDist = Math.hypot(best.x - ARENA_X, best.y - ARENA_Y);
-      const playerDist = Math.hypot(player.x - ARENA_X, player.y - ARENA_Y);
-      return playerDist < bestDist ? player : best;
-    }, survivors[0]);
-    winner.score += 1;
-    endMatch(roomCode, winner);
+  }
+
+  if (tournamentAlive.length === 1 && getTournamentPlayers(room).length === 1) {
+    if (Math.hypot(tournamentAlive[0].vx, tournamentAlive[0].vy) === 0) {
+      tournamentAlive[0].score += 1;
+      endMatch(roomCode, tournamentAlive[0]);
+      return;
+    }
   }
 
   // 5. Broadcast updated coordinates and collisions to clients
@@ -281,6 +451,14 @@ function endMatch(roomCode, winner) {
     clearInterval(room.physicsIntervalId);
     room.physicsIntervalId = null;
   }
+  if (room.timerId) {
+    clearInterval(room.timerId);
+    room.timerId = null;
+  }
+  if (room.intermissionTimeoutId) {
+    clearTimeout(room.intermissionTimeoutId);
+    room.intermissionTimeoutId = null;
+  }
 
   io.to(roomCode).emit('match_ended', {
     winner: winner ? { id: winner.id, name: winner.name, color: winner.color } : null,
@@ -296,8 +474,8 @@ function endMatch(roomCode, winner) {
 // Run bot AI aiming before countdown reaches 0
 function runBotAI(room) {
   const players = Object.values(room.players);
-  const bots = players.filter(p => p.isBot && p.isAlive);
-  const humans = players.filter(p => !p.isBot && p.isAlive);
+  const bots = players.filter(p => p.isBot && p.isAlive && p.inTournament);
+  const humans = players.filter(p => !p.isBot && p.isAlive && p.inTournament);
 
   bots.forEach(bot => {
     // Bot AI: Find a target (a random active human player, or another active bot if no humans are alive)
@@ -349,7 +527,7 @@ io.on('connection', (socket) => {
       code: roomCode,
       players: {},
       gameState: 'LOBBY',
-      countdown: 5,
+      countdown: AIM_COUNTDOWN_SECONDS,
       timerId: null,
       physicsIntervalId: null,
       battleTicks: 0,
@@ -372,7 +550,8 @@ io.on('connection', (socket) => {
       force: 0.5,
       score: 0,
       maxSpeed: 0,
-      knockouts: 0
+      knockouts: 0,
+      inTournament: true
     };
 
     socket.emit('room_created', getRoomPayload(rooms[roomCode]));
@@ -394,6 +573,11 @@ io.on('connection', (socket) => {
       return;
     }
 
+    if (Object.keys(room.players).length >= TARGET_TOURNAMENT_SIZE) {
+      socket.emit('error_message', `Room is full (max ${TARGET_TOURNAMENT_SIZE} players).`);
+      return;
+    }
+
     socket.join(code);
 
     room.players[socket.id] = {
@@ -412,7 +596,8 @@ io.on('connection', (socket) => {
       force: 0.5,
       score: 0,
       maxSpeed: 0,
-      knockouts: 0
+      knockouts: 0,
+      inTournament: true
     };
 
     console.log(`${playerName} joined room ${code}`);
@@ -429,9 +614,8 @@ io.on('connection', (socket) => {
     const requester = room.players[socket.id];
     if (!requester || !requester.isHost) return;
 
-    // Cap total players at 8
-    if (Object.keys(room.players).length >= 8) {
-      socket.emit('error_message', 'Room is full (max 8 players).');
+    if (Object.keys(room.players).length >= TARGET_TOURNAMENT_SIZE) {
+      socket.emit('error_message', `Room is full (max ${TARGET_TOURNAMENT_SIZE} players).`);
       return;
     }
 
@@ -458,7 +642,8 @@ io.on('connection', (socket) => {
       force: 0.5,
       score: 0,
       maxSpeed: 0,
-      knockouts: 0
+      knockouts: 0,
+      inTournament: true
     };
 
     console.log(`Bot added to room ${roomCode}: ${name}`);
@@ -517,55 +702,8 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Set game state to AIMING
-    room.gameState = 'AIMING';
-    room.countdown = 5;
-    room.battleTicks = 0;
-    room.stats = { collisions: 0 };
-
-    // Distribute players in the center circle in fair, non-overlapping positions
-    const numPlayers = players.length;
-    players.forEach((player, index) => {
-      const angle = (index * 2 * Math.PI) / numPlayers;
-      player.x = ARENA_X + Math.cos(angle) * SPAWN_RADIUS;
-      player.y = ARENA_Y + Math.sin(angle) * SPAWN_RADIUS;
-      player.vx = 0;
-      player.vy = 0;
-      player.isAlive = true;
-      player.angle = angle + Math.PI; // Aim towards center initially
-      player.force = 0.5;
-      player.maxSpeed = 0;
-      player.knockouts = 0;
-      player.eliminatedAtTick = null;
-    });
-
-    // Notify clients that aiming phase has started
-    io.to(roomCode).emit('aiming_start', getRoomPayload(room));
-
-    // Clear any existing timer
-    if (room.timerId) clearInterval(room.timerId);
-
-    // Countdown Timer
-    room.timerId = setInterval(() => {
-      room.countdown--;
-
-      if (room.countdown > 0) {
-        io.to(roomCode).emit('countdown_tick', { countdown: room.countdown });
-      } else {
-        // Countdown reached 0! Launch time!
-        clearInterval(room.timerId);
-        room.timerId = null;
-
-        // Run AI calculations for bots immediately before launch
-        runBotAI(room);
-
-        // Transition room state to BATTLE
-        room.gameState = 'BATTLE';
-
-        // Start Authoritative Physics
-        startPhysicsLoop(roomCode);
-      }
-    }, 1000);
+    initializeTournament(room);
+    beginRoundAiming(roomCode);
   });
 
   // Receive Aim input from active player
@@ -574,8 +712,7 @@ io.on('connection', (socket) => {
     if (!room || room.gameState !== 'AIMING') return;
 
     const player = room.players[socket.id];
-    if (player && player.isAlive) {
-      // Clamp force between 0 and 1
+    if (player && player.isAlive && player.inTournament) {
       player.angle = angle;
       player.force = Math.max(0, Math.min(1, force));
 
@@ -605,15 +742,22 @@ io.on('connection', (socket) => {
       clearInterval(room.timerId);
       room.timerId = null;
     }
+    if (room.intermissionTimeoutId) {
+      clearTimeout(room.intermissionTimeoutId);
+      room.intermissionTimeoutId = null;
+    }
 
-    // Reset states back to lobby
     room.gameState = 'LOBBY';
-    room.countdown = 5;
+    room.countdown = AIM_COUNTDOWN_SECONDS;
     room.battleTicks = 0;
     room.stats = { collisions: 0 };
+    room.tournamentRound = 0;
+    room.eliminationsNeeded = 0;
+    room.roundAliveCount = 0;
     Object.values(room.players).forEach(player => {
-      player.isReady = player.isBot ? true : false; // Bots stay ready
+      player.isReady = player.isBot ? true : false;
       player.isAlive = true;
+      player.inTournament = true;
       player.vx = 0;
       player.vy = 0;
       player.angle = 0;
@@ -658,13 +802,14 @@ io.on('connection', (socket) => {
 
           // If in BATTLE or AIMING, check if the game is still playable
           if (room.gameState === 'BATTLE') {
-            const alivePlayers = players.filter(p => p.isAlive);
-            if (alivePlayers.length === 1 && players.length > 1) {
-              const winner = alivePlayers[0];
-              winner.score += 1;
-              endMatch(roomCode, winner);
-            } else if (alivePlayers.length === 0) {
-              endMatch(roomCode, null);
+            const tournamentAlive = players.filter(p => p.inTournament && p.isAlive);
+            const eliminatedThisRound = room.roundAliveCount - tournamentAlive.length;
+            if (eliminatedThisRound >= room.eliminationsNeeded) {
+              endBattleRound(roomCode);
+            } else if (getTournamentPlayers(room).length <= 1) {
+              const winner = getTournamentPlayers(room)[0];
+              if (winner) winner.score += 1;
+              endMatch(roomCode, winner || null);
             }
           }
 
