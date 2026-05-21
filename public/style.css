@@ -219,6 +219,23 @@ input[type="text"]:focus {
   box-shadow: 0 0 10px rgba(0, 240, 255, 0.15);
 }
 
+.mode-select {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  padding: 14px 16px;
+  color: var(--text-primary);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.mode-select:focus {
+  border-color: var(--cyan);
+  outline: none;
+}
+
 /* Cyber color picker preset grid */
 .color-picker-grid {
   display: flex;

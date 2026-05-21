@@ -40,7 +40,15 @@ const hudAliveCount = document.getElementById('hud-alive-count');
 const hudCodeText = document.getElementById('hud-code-text');
 const hudPhaseText = document.getElementById('hud-phase-text');
 const hudRoundText = document.getElementById('hud-round-text');
+const hudStrikesText = document.getElementById('hud-strikes-text');
+const hudStrikesWrap = document.getElementById('hud-strikes-wrap');
+const hudRoundWrap = document.getElementById('hud-round-wrap');
 const hudRoundBanner = document.getElementById('hud-round-banner');
+const gameModeSelect = document.getElementById('game-mode-select');
+const lobbyGameMode = document.getElementById('lobby-game-mode');
+const lobbyModeTip = document.getElementById('lobby-mode-tip');
+const hostModePicker = document.getElementById('host-mode-picker');
+const aimingSubtext = document.getElementById('aiming-subtext');
 const hudRoundLabel = document.getElementById('hud-round-label');
 const hudRoundSub = document.getElementById('hud-round-sub');
 const eliminationFeed = document.getElementById('elimination-feed');
@@ -89,6 +97,44 @@ let isDraggingAim = false;
 let lastAimSentTime = 0;
 let aimAngle = 0;
 let aimForce = 0.5;
+let chosenGameMode = 'BAT_ARENA';
+let serverBattleTicks = 0;
+const moveKeys = { w: false, a: false, s: false, d: false, ArrowUp: false, ArrowLeft: false, ArrowDown: false, ArrowRight: false };
+let lastMoveSentTime = 0;
+let lastSwingSentTime = 0;
+let spaceSwingHeld = false;
+
+const MODE_TIPS = {
+  BAT_ARENA: 'Bat Arena: free-for-all brawl. Swing your bat to knock pilots toward the ring — 3 ring touches eliminates them. Last one standing wins.',
+  TOURNAMENT: 'Tournament mode: up to 6 pilots. Each round eliminates 2 until one champion remains. Add bots to fill the bracket.'
+};
+
+function isBatArenaMode(room = currentRoom) {
+  return room && room.gameMode === 'BAT_ARENA';
+}
+
+function updateHudForMode(room) {
+  const bat = isBatArenaMode(room);
+  hudStrikesWrap.classList.toggle('hidden', !bat);
+  hudRoundWrap.classList.toggle('hidden', bat);
+  hudRoundBanner.classList.toggle('hidden', bat);
+  if (bat) {
+    hudPhaseText.innerText = room.gameState === 'AIMING' ? 'GET READY' : hudPhaseText.innerText;
+  }
+}
+
+function syncBatArenaHud() {
+  const me = localPlayers[myId];
+  const maxStrikes = currentRoom?.borderStrikesToEliminate || 3;
+  const strikes = me?.borderStrikes || 0;
+  hudStrikesText.innerText = `${strikes}/${maxStrikes}`;
+  const alive = Object.values(localPlayers).filter(p => p.isAlive).length;
+  const total = Object.values(localPlayers).length;
+  hudAliveCount.innerText = `${alive}/${total}`;
+  hudRoundLabel.innerText = 'BAT ARENA';
+  hudRoundSub.innerText = 'WASD move · Left-click or Space to swing';
+  hudRoundBanner.classList.remove('hidden');
+}
 
 // Initialize Color Selector Nodes
 colorNodes.forEach(node => {
@@ -186,9 +232,24 @@ window.addEventListener('load', () => {
 /* ==================== SOCKET INTERACTIONS ==================== */
 
 // Create Room Action
+if (gameModeSelect) {
+  gameModeSelect.addEventListener('change', () => {
+    chosenGameMode = gameModeSelect.value;
+  });
+}
+
+if (lobbyGameMode) {
+  lobbyGameMode.addEventListener('change', () => {
+    if (currentRoom) {
+      socket.emit('set_game_mode', { roomCode: currentRoom.code, gameMode: lobbyGameMode.value });
+    }
+  });
+}
+
 document.getElementById('btn-create-room').addEventListener('click', () => {
   const name = cleanPlayerName();
-  socket.emit('create_room', { playerName: name, playerColor: chosenColor });
+  chosenGameMode = gameModeSelect ? gameModeSelect.value : 'BAT_ARENA';
+  socket.emit('create_room', { playerName: name, playerColor: chosenColor, gameMode: chosenGameMode });
 });
 
 // Join Room Action
@@ -254,8 +315,9 @@ socket.on('error_message', (msg) => {
 socket.on('room_created', (room) => {
   myId = socket.id;
   handleRoomUpdate(room);
+  updateHudForMode(room);
   showScreen('lobby');
-  showToast('Arena Initialized!');
+  showToast(room.gameMode === 'BAT_ARENA' ? 'Bat Arena room ready!' : 'Arena Initialized!');
 });
 
 socket.on('room_joined', (room) => {
@@ -279,6 +341,27 @@ function syncTournamentHud(room) {
   hudRoundBanner.classList.remove('hidden');
 }
 
+function updateLobbyModeUi(room) {
+  const mode = room.gameMode || 'TOURNAMENT';
+  if (lobbyModeTip) lobbyModeTip.innerText = MODE_TIPS[mode] || MODE_TIPS.TOURNAMENT;
+  if (playerCountDisplay) {
+    const maxP = mode === 'BAT_ARENA' ? 8 : 6;
+    playerCountDisplay.innerText = room.players.length;
+    const panelHeader = playerCountDisplay.closest('.panel-header');
+    if (panelHeader) {
+      panelHeader.querySelector('h3').innerHTML = `CONNECTED PLAYERS (<span id="player-count">${room.players.length}</span>/${maxP})`;
+    }
+  }
+
+  const me = room.players.find(p => p.id === myId);
+  if (me && me.isHost && hostModePicker && lobbyGameMode) {
+    hostModePicker.classList.remove('hidden');
+    lobbyGameMode.value = mode;
+  } else if (hostModePicker) {
+    hostModePicker.classList.add('hidden');
+  }
+}
+
 socket.on('aiming_start', (room) => {
   currentPhase = 'AIMING';
   currentRoom = room;
@@ -292,9 +375,16 @@ socket.on('aiming_start', (room) => {
 
   // Sync HUD
   hudCodeText.innerText = `ROOM: ${room.code}`;
-  hudPhaseText.innerText = 'AIMING';
+  hudPhaseText.innerText = isBatArenaMode(room) ? 'GET READY' : 'AIMING';
   hudPhaseText.className = 'hud-value neon-cyan';
-  syncTournamentHud(room);
+  updateHudForMode(room);
+  if (isBatArenaMode(room)) {
+    syncBatArenaHud();
+    if (aimingSubtext) aimingSubtext.innerText = 'Get ready — WASD to move, left-click or Space to swing';
+  } else {
+    syncTournamentHud(room);
+    if (aimingSubtext) aimingSubtext.innerText = 'AIM WITH MOUSE OR TOUCH DRAG';
+  }
 
   // Initialize client side players copy
   localPlayers = {};
@@ -339,10 +429,15 @@ socket.on('battle_start', (room) => {
   currentPhase = 'BATTLE';
   currentRoom = room;
   aimingCountdown.classList.add('hidden');
+  if (canvas && isBatArenaMode(room)) {
+    canvas.setAttribute('tabindex', '0');
+    canvas.focus();
+  }
 
   hudPhaseText.innerText = 'BATTLE';
   hudPhaseText.className = 'hud-value neon-pink';
-  syncTournamentHud(room);
+  if (isBatArenaMode(room)) syncBatArenaHud();
+  else syncTournamentHud(room);
 
   // Apply final states from server
   room.players.forEach(p => {
@@ -357,7 +452,9 @@ socket.on('battle_start', (room) => {
 });
 
 // Fast real-time Authoritative physics coordinates sync (60 FPS)
-socket.on('physics_update', ({ players, collisions }) => {
+socket.on('physics_update', ({ players, collisions, battleTicks }) => {
+  if (typeof battleTicks === 'number') serverBattleTicks = battleTicks;
+
   players.forEach(srvPlayer => {
     const clientPlayer = localPlayers[srvPlayer.id];
     if (clientPlayer) {
@@ -365,35 +462,71 @@ socket.on('physics_update', ({ players, collisions }) => {
       clientPlayer.y = srvPlayer.y;
       clientPlayer.vx = srvPlayer.vx;
       clientPlayer.vy = srvPlayer.vy;
+      if (typeof srvPlayer.facingAngle === 'number') {
+        clientPlayer.facingAngle = srvPlayer.facingAngle;
+        clientPlayer.angle = srvPlayer.facingAngle;
+      }
+      if (typeof srvPlayer.borderStrikes === 'number') clientPlayer.borderStrikes = srvPlayer.borderStrikes;
+      if (typeof srvPlayer.swingActiveUntil === 'number') clientPlayer.swingActiveUntil = srvPlayer.swingActiveUntil;
       if (typeof srvPlayer.inTournament === 'boolean') {
         clientPlayer.inTournament = srvPlayer.inTournament;
       }
 
       if (clientPlayer.isAlive && !srvPlayer.isAlive) {
-        // Just got eliminated locally
         clientPlayer.isAlive = false;
       }
     }
   });
 
-  // Spawn visual collision sparks
+  if (isBatArenaMode()) syncBatArenaHud();
+
   collisions.forEach(c => {
     spawnCollisionSparks(c.x, c.y, c.p1Color, c.p2Color, c.intensity);
   });
 });
 
-socket.on('player_eliminated', ({ id, name, color, x, y }) => {
+socket.on('bat_hit', ({ hits }) => {
+  hits.forEach(h => {
+    const victim = localPlayers[h.victimId];
+    if (victim) spawnCollisionSparks(h.x, h.y, victim.color, COLORS.gold, 6);
+    const attacker = localPlayers[h.attackerId];
+    if (attacker && victim) {
+      addFeedItem(attacker.name, attacker.color, `smacked <span style="color:${victim.color}">${victim.name}</span> toward the ring!`);
+    }
+    const view = playerViews.get(h.attackerId);
+    if (view) triggerBatSwing(view);
+  });
+});
+
+socket.on('border_strike', ({ id, name, color, strikes, maxStrikes }) => {
+  if (localPlayers[id]) localPlayers[id].borderStrikes = strikes;
+  addFeedItem(name, color, `touched the ring <span style="color:#ffcc00">${strikes}/${maxStrikes}</span>`);
+  if (id === myId) syncBatArenaHud();
+});
+
+socket.on('bat_swing', ({ id, angle }) => {
+  if (localPlayers[id]) {
+    localPlayers[id].facingAngle = angle;
+    localPlayers[id].angle = angle;
+    const view = playerViews.get(id);
+    if (view) triggerBatSwing(view);
+  }
+});
+
+socket.on('player_eliminated', ({ id, name, color, x, y, reason }) => {
   if (localPlayers[id]) {
     localPlayers[id].isAlive = false;
   }
 
-  // Trigger glowing boundary expansion shockwave
   spawnBoundaryShockwave(x, y, color);
-  
-  // Log elimination to live ticker HUD
-  addFeedItem(name, color);
 
-  updateAliveHUD();
+  const detail = reason === 'strikes'
+    ? 'took <span style="color: #ff2a5f; font-weight: 800;">3 RING STRIKES</span> & was eliminated'
+    : 'crossed boundary & was <span style="color: #ff2a5f; font-weight: 800;">ELIMINATED</span>';
+  addFeedItem(name, color, detail);
+
+  if (isBatArenaMode()) syncBatArenaHud();
+  else updateAliveHUD();
 });
 
 socket.on('match_ended', ({ winner, room, stats }) => {
@@ -426,10 +559,10 @@ socket.on('match_restarted', (room) => {
 // Update Lobby screen states
 function handleRoomUpdate(room) {
   currentRoom = room;
-  
+  updateLobbyModeUi(room);
+
   // Update Room Display
   roomCodeDisplay.innerText = room.code;
-  playerCountDisplay.innerText = room.players.length;
 
   // Clear listing
   playerList.innerHTML = '';
@@ -530,6 +663,10 @@ function handleRoomUpdate(room) {
       btnStartGame.classList.add('btn-disabled');
       btnStartGame.disabled = true;
     }
+
+    btnStartGame.innerText = room.gameMode === 'BAT_ARENA'
+      ? 'START BAT ARENA BRAWL'
+      : 'ENGAGE LAUNCH SEQUENCE';
   } else {
     hostControls.classList.add('hidden');
   }
@@ -799,6 +936,9 @@ function createPlayerView(player) {
   const aimArrow = createAimArrow(player.color);
   group.add(aimArrow);
 
+  const bat = createBatMesh(player.color);
+  group.add(bat);
+
   const label = createNameSprite(player.name, player.color, player.id === myId);
   label.position.y = 78;
   group.add(label);
@@ -816,6 +956,8 @@ function createPlayerView(player) {
     bodyRoot,
     halo,
     aimArrow,
+    bat,
+    batSwing: 0,
     label,
     trail,
     trailPoints: [],
@@ -891,6 +1033,43 @@ function tintModel(root, color) {
   });
 }
 
+function createBatMesh(color) {
+  const group = new THREE.Group();
+  const wood = new THREE.MeshStandardMaterial({ color: 0xc68642, metalness: 0.2, roughness: 0.55 });
+  const grip = new THREE.MeshStandardMaterial({ color: 0x2a1810, metalness: 0.1, roughness: 0.8 });
+  const accent = new THREE.MeshStandardMaterial({
+    color: new THREE.Color(color),
+    emissive: new THREE.Color(color),
+    emissiveIntensity: 0.25,
+    metalness: 0.4,
+    roughness: 0.35
+  });
+
+  const handle = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.6, 18, 10), grip);
+  handle.rotation.x = Math.PI / 2;
+  handle.position.z = -9;
+  group.add(handle);
+
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(2.8, 3.4, 42, 12), wood);
+  barrel.rotation.x = Math.PI / 2;
+  barrel.position.z = 12;
+  group.add(barrel);
+
+  const band = new THREE.Mesh(new THREE.TorusGeometry(3.2, 0.6, 8, 16), accent);
+  band.rotation.y = Math.PI / 2;
+  band.position.z = 4;
+  group.add(band);
+
+  group.position.set(PLAYER_RADIUS + 8, 28, 0);
+  group.rotation.y = Math.PI / 2;
+  group.visible = false;
+  return group;
+}
+
+function triggerBatSwing(view) {
+  view.batSwing = 1;
+}
+
 function createAimArrow(color) {
   const group = new THREE.Group();
   const material = new THREE.MeshBasicMaterial({ color: new THREE.Color(color), transparent: true, opacity: 0.92 });
@@ -964,8 +1143,27 @@ function updatePlayerViews(delta) {
     view.halo.material.opacity = player.isAlive ? 0.72 + Math.sin(performance.now() * 0.006) * 0.13 : 0.16;
 
     const speed = Math.hypot(player.vx || 0, player.vy || 0);
-    const faceAngle = speed > 0.15 ? Math.atan2(player.vy, player.vx) : player.angle;
+    const faceAngle = typeof player.facingAngle === 'number'
+      ? player.facingAngle
+      : (speed > 0.15 ? Math.atan2(player.vy, player.vx) : player.angle);
     view.group.rotation.y = Math.PI / 2 - faceAngle;
+
+    const batMode = isBatArenaMode();
+    view.bat.visible = batMode && player.isAlive && inTournament;
+    view.aimArrow.visible = !batMode && currentPhase === 'AIMING' && player.isAlive;
+
+    if (view.bat.visible) {
+      const swingT = view.batSwing;
+      if (swingT > 0) {
+        view.bat.rotation.z = -Math.sin(swingT * Math.PI) * 1.65;
+        view.batSwing = Math.max(0, swingT - delta * 6.5);
+      } else {
+        view.bat.rotation.z *= 0.82;
+      }
+      view.bat.rotation.y = Math.PI / 2;
+    }
+
+    view.halo.material.color.set(new THREE.Color(player.color));
 
     if (view.mixer) {
       view.mixer.update(delta * (player.isAlive ? 1 + Math.min(speed / 12, 0.7) : 0.25));
@@ -1071,10 +1269,83 @@ function updateEffects() {
   }
 }
 
+function getMoveVector() {
+  let dx = 0;
+  let dy = 0;
+  if (moveKeys.w || moveKeys.ArrowUp) dy -= 1;
+  if (moveKeys.s || moveKeys.ArrowDown) dy += 1;
+  if (moveKeys.a || moveKeys.ArrowLeft) dx -= 1;
+  if (moveKeys.d || moveKeys.ArrowRight) dx += 1;
+  return { dx, dy };
+}
+
+function sendBatArenaInput() {
+  if (!currentRoom || currentPhase !== 'BATTLE' || !isBatArenaMode()) return;
+  const me = localPlayers[myId];
+  if (!me || !me.isAlive) return;
+
+  const { dx, dy } = getMoveVector();
+  const now = Date.now();
+  if (now - lastMoveSentTime < 33) return;
+  lastMoveSentTime = now;
+
+  let facingAngle = me.facingAngle ?? me.angle ?? 0;
+  if (Math.hypot(dx, dy) > 0.01) {
+    facingAngle = Math.atan2(dy, dx);
+    me.facingAngle = facingAngle;
+    me.angle = facingAngle;
+  }
+
+  socket.emit('player_move', {
+    roomCode: currentRoom.code,
+    dx,
+    dy,
+    facingAngle
+  });
+}
+
+function tryBatSwing(worldPoint) {
+  if (activeScreen !== 'game' || !currentRoom || currentPhase !== 'BATTLE' || !isBatArenaMode()) return false;
+  const me = localPlayers[myId];
+  if (!me || !me.isAlive) return false;
+
+  const now = Date.now();
+  if (now - lastSwingSentTime < 180) return false;
+  lastSwingSentTime = now;
+
+  let angle = me.facingAngle ?? me.angle ?? 0;
+  if (worldPoint) {
+    const serverPoint = worldToServer(worldPoint);
+    const dx = serverPoint.x - me.x;
+    const dy = serverPoint.y - me.y;
+    if (Math.hypot(dx, dy) > 8) {
+      angle = Math.atan2(dy, dx);
+    }
+  }
+
+  me.facingAngle = angle;
+  me.angle = angle;
+  const view = playerViews.get(myId);
+  if (view) triggerBatSwing(view);
+
+  socket.emit('bat_swing', { roomCode: currentRoom.code, angle });
+  return true;
+}
+
+function handleBatSwingKey(down) {
+  if (down) {
+    if (!spaceSwingHeld) tryBatSwing(null);
+    spaceSwingHeld = true;
+  } else {
+    spaceSwingHeld = false;
+  }
+}
+
 function render3D() {
   requestAnimationFrame(render3D);
   const delta = clock.getDelta();
   resizeThree();
+  sendBatArenaInput();
   updateCamera();
   updatePlayerViews(delta);
   updateEffects();
@@ -1123,7 +1394,9 @@ function pointerNdc(e) {
 function arenaPointFromPointer(e) {
   raycaster.setFromCamera(pointerNdc(e), camera);
   const hit = new THREE.Vector3();
-  raycaster.ray.intersectPlane(arenaPlane, hit);
+  if (!raycaster.ray.intersectPlane(arenaPlane, hit)) {
+    return null;
+  }
   return hit;
 }
 
@@ -1140,8 +1413,16 @@ function projectedPlayerDistance(player, eventPoint) {
 function startAimDrag(e) {
   const point = pointerFromEvent(e);
   const me = localPlayers[myId];
+  const isLeftClick = e.button === undefined || e.button === 0;
 
-  if (currentPhase === 'AIMING' && me && me.isAlive && projectedPlayerDistance(me, point) < 95) {
+  if (currentPhase === 'BATTLE' && isBatArenaMode() && me && me.isAlive && isLeftClick) {
+    e.preventDefault();
+    const hit = arenaPointFromPointer(e);
+    tryBatSwing(hit);
+    return;
+  }
+
+  if (currentPhase === 'AIMING' && !isBatArenaMode() && me && me.isAlive && projectedPlayerDistance(me, point) < 95) {
     isDraggingAim = true;
     updateAimVector(e);
     return;
@@ -1213,6 +1494,33 @@ window.addEventListener('touchmove', (e) => {
   continueAimDrag(e);
 }, { passive: false });
 window.addEventListener('touchend', endAimDrag);
+function onGameKeyDown(e) {
+  if (activeScreen !== 'game') return;
+
+  if (moveKeys[e.key] !== undefined) {
+    moveKeys[e.key] = true;
+    e.preventDefault();
+  }
+
+  if (e.code === 'Space' && currentPhase === 'BATTLE' && isBatArenaMode()) {
+    e.preventDefault();
+    handleBatSwingKey(true);
+  }
+}
+
+function onGameKeyUp(e) {
+  if (moveKeys[e.key] !== undefined) {
+    moveKeys[e.key] = false;
+    e.preventDefault();
+  }
+  if (e.code === 'Space') {
+    spaceSwingHeld = false;
+  }
+}
+
+document.addEventListener('keydown', onGameKeyDown);
+document.addEventListener('keyup', onGameKeyUp);
+
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   targetCameraDistance = Math.max(470, Math.min(960, targetCameraDistance + e.deltaY * 0.5));

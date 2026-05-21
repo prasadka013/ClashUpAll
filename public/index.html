@@ -71,6 +71,13 @@
 
         <!-- Create Room Tab Form -->
         <div id="form-create" class="tab-form active">
+          <div class="input-group">
+            <label for="game-mode-select">GAME MODE</label>
+            <select id="game-mode-select" class="mode-select">
+              <option value="BAT_ARENA" selected>Bat Arena — free-for-all brawl</option>
+              <option value="TOURNAMENT">Tournament — aim &amp; launch bracket</option>
+            </select>
+          </div>
           <button id="btn-create-room" class="btn btn-primary pulse-hover">INITIALIZE ARENA</button>
         </div>
 
@@ -112,7 +119,14 @@
             <h3>READY SEQUENCE</h3>
           </div>
           <div class="controls-status">
-            <p class="status-tip">Tournament mode: up to 6 pilots. Each round eliminates 2 until one champion remains. Add bots to fill the bracket.</p>
+            <p id="lobby-mode-tip" class="status-tip">Bat Arena: free-for-all brawl. Knock pilots toward the ring with your bat — 3 ring touches eliminates them. Last one standing wins.</p>
+            <div id="host-mode-picker" class="input-group hidden">
+              <label for="lobby-game-mode">ROOM MODE (HOST)</label>
+              <select id="lobby-game-mode" class="mode-select">
+                <option value="BAT_ARENA" selected>Bat Arena</option>
+                <option value="TOURNAMENT">Tournament</option>
+              </select>
+            </div>
           </div>
           <div class="lobby-action-buttons">
             <button id="btn-ready" class="btn btn-secondary pulse-hover">READY UP</button>
@@ -139,7 +153,11 @@
         <div class="hud-room-code">
           <span id="hud-code-text">ABCD</span>
         </div>
-        <div class="hud-item">
+        <div class="hud-item" id="hud-strikes-wrap">
+          <span class="hud-label">STRIKES</span>
+          <span id="hud-strikes-text" class="hud-value neon-gold">0/3</span>
+        </div>
+        <div class="hud-item" id="hud-round-wrap">
           <span class="hud-label">ROUND</span>
           <span id="hud-round-text" class="hud-value neon-gold">1</span>
         </div>
@@ -156,12 +174,12 @@
 
       <!-- Main Game Canvas Container -->
       <div class="canvas-wrapper">
-        <canvas id="gameCanvas"></canvas>
+        <canvas id="gameCanvas" tabindex="0"></canvas>
         
         <!-- Big countdown inside Canvas coordinates -->
         <div id="aiming-countdown" class="aiming-countdown hidden">
           <h2 id="countdown-number">15</h2>
-          <p class="aiming-subtext">AIM WITH MOUSE OR TOUCH DRAG</p>
+          <p id="aiming-subtext" class="aiming-subtext">AIM WITH MOUSE OR TOUCH DRAG</p>
         </div>
       </div>
 

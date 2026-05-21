@@ -30,8 +30,23 @@ const FRICTION = 0.972; // Stronger damping per tick
 const BOUNCE_RESTITUTION = 0.72; // Softer bounces (no energy gain on impact)
 const COLLISION_IMPULSE_SCALE = 0.38; // Extra dampening on player-vs-player hits
 const AIM_COUNTDOWN_SECONDS = 15;
+const BAT_ARENA_COUNTDOWN_SECONDS = 5;
 const ROUND_INTERMISSION_MS = 4000;
 const TARGET_TOURNAMENT_SIZE = 6;
+const BAT_ARENA_MAX_PLAYERS = 8;
+
+// Bat Arena mode
+const BAT_MOVE_SPEED = 4.8;
+const BAT_LENGTH = 72;
+const BAT_HIT_WIDTH = 32;
+const BAT_SWING_DURATION_TICKS = 18;
+const BAT_SWING_COOLDOWN_TICKS = 22;
+const BAT_HIT_IMMUNITY_TICKS = 24;
+const BAT_BORDER_STRIKE_COOLDOWN_TICKS = 75;
+const BORDER_STRIKES_TO_ELIMINATE = 3;
+const BAT_BORDER_TOUCH_DIST = ARENA_RADIUS - 18;
+const BAT_KNOCKBACK = 13;
+const BAT_MAX_KNOCKBACK_SPEED = 16;
 
 // Rooms state store
 // Room Code -> { code, players: { socketId: playerState }, gameState: 'LOBBY'|'AIMING'|'BATTLE'|'GAMEOVER', countdown, timerId, physicsIntervalId, battleTicks }
@@ -53,6 +68,42 @@ function generateRoomCode() {
 // Bot Names List
 const BOT_NAMES = ['BumperBot', 'SlamMaster', 'CurlingKing', 'DriftDroid', 'BouncyBoy', 'ApexPusher', 'TurboAI', 'Orbiteer'];
 const BOT_COLORS = ['#ff2a5f', '#00f0ff', '#39ff14', '#ffcc00', '#8a2be2', '#ff5722', '#e91e63', '#00bcd4'];
+
+function isBatArena(room) {
+  return room.gameMode === 'BAT_ARENA';
+}
+
+function getActivePlayers(room) {
+  return Object.values(room.players).filter(p => p.isAlive);
+}
+
+function createDefaultPlayerState(overrides = {}) {
+  return {
+    isReady: false,
+    isHost: false,
+    isBot: false,
+    isAlive: true,
+    x: ARENA_X,
+    y: ARENA_Y,
+    vx: 0,
+    vy: 0,
+    angle: 0,
+    force: 0.5,
+    score: 0,
+    maxSpeed: 0,
+    knockouts: 0,
+    inTournament: true,
+    borderStrikes: 0,
+    facingAngle: 0,
+    swingActiveFrom: 0,
+    swingActiveUntil: 0,
+    swingCooldownUntil: 0,
+    hitImmuneUntil: 0,
+    borderStrikeCooldownUntil: 0,
+    lastHitBy: null,
+    ...overrides
+  };
+}
 
 function getRoundEliminationTarget(activeCount) {
   if (activeCount <= 1) return 0;
@@ -124,6 +175,336 @@ function forceEliminateFurthest(room, count) {
       x: player.x,
       y: player.y
     });
+  });
+}
+
+function spawnBatArenaPlayers(room) {
+  const competitors = Object.values(room.players).filter(p => p.isAlive);
+  const numPlayers = competitors.length;
+  competitors.forEach((player, index) => {
+    const angle = (index * 2 * Math.PI) / numPlayers;
+    player.x = ARENA_X + Math.cos(angle) * SPAWN_RADIUS;
+    player.y = ARENA_Y + Math.sin(angle) * SPAWN_RADIUS;
+    player.vx = 0;
+    player.vy = 0;
+    player.isAlive = true;
+    player.facingAngle = angle + Math.PI;
+    player.angle = player.facingAngle;
+    player.borderStrikes = 0;
+    player.swingActiveFrom = 0;
+    player.swingActiveUntil = 0;
+    player.swingCooldownUntil = 0;
+    player.hitImmuneUntil = 0;
+    player.borderStrikeCooldownUntil = 0;
+    player.lastHitBy = null;
+    player.inTournament = true;
+  });
+}
+
+function initializeBatArena(room) {
+  Object.values(room.players).forEach(player => {
+    player.inTournament = true;
+    player.isAlive = true;
+    player.borderStrikes = 0;
+    player.knockouts = 0;
+  });
+}
+
+function beginBatArenaBattle(roomCode) {
+  const room = rooms[roomCode];
+  if (!room) return;
+
+  const competitors = Object.values(room.players).filter(p => p.isAlive);
+  if (competitors.length <= 1) {
+    endMatch(roomCode, competitors[0] || null);
+    return;
+  }
+
+  room.gameState = 'AIMING';
+  room.countdown = BAT_ARENA_COUNTDOWN_SECONDS;
+  room.battleTicks = 0;
+  room.stats = { collisions: 0, batHits: 0 };
+
+  spawnBatArenaPlayers(room);
+  io.to(roomCode).emit('aiming_start', getRoomPayload(room));
+
+  if (room.timerId) clearInterval(room.timerId);
+  room.timerId = setInterval(() => {
+    room.countdown--;
+    if (room.countdown > 0) {
+      io.to(roomCode).emit('countdown_tick', { countdown: room.countdown });
+    } else {
+      clearInterval(room.timerId);
+      room.timerId = null;
+      runBatArenaBotAI(room);
+      room.gameState = 'BATTLE';
+      startBatArenaPhysicsLoop(roomCode);
+    }
+  }, 1000);
+}
+
+function clampToArena(player) {
+  const dx = player.x - ARENA_X;
+  const dy = player.y - ARENA_Y;
+  const dist = Math.hypot(dx, dy);
+  if (dist > ARENA_RADIUS - PLAYER_RADIUS) {
+    const nx = dx / (dist || 1);
+    const ny = dy / (dist || 1);
+    const maxDist = ARENA_RADIUS - PLAYER_RADIUS;
+    player.x = ARENA_X + nx * maxDist;
+    player.y = ARENA_Y + ny * maxDist;
+    const dot = player.vx * nx + player.vy * ny;
+    if (dot > 0) {
+      player.vx -= nx * dot * 1.4;
+      player.vy -= ny * dot * 1.4;
+    }
+    return true;
+  }
+  return false;
+}
+
+function segmentPointDistance(ax, ay, bx, by, px, py) {
+  const abx = bx - ax;
+  const aby = by - ay;
+  const apx = px - ax;
+  const apy = py - ay;
+  const abLenSq = abx * abx + aby * aby;
+  const t = abLenSq === 0 ? 0 : Math.max(0, Math.min(1, (apx * abx + apy * aby) / abLenSq));
+  const cx = ax + abx * t;
+  const cy = ay + aby * t;
+  return Math.hypot(px - cx, py - cy);
+}
+
+function isSwingActive(attacker, battleTicks) {
+  return battleTicks >= (attacker.swingActiveFrom || 0) && battleTicks <= (attacker.swingActiveUntil || 0);
+}
+
+function applyBatKnockback(victim, swingAngle) {
+  victim.vx += Math.cos(swingAngle) * BAT_KNOCKBACK;
+  victim.vy += Math.sin(swingAngle) * BAT_KNOCKBACK;
+  clampPlayerVelocity(victim, BAT_MAX_KNOCKBACK_SPEED);
+}
+
+function resolveBatHitsForAttacker(room, roomCode, attacker) {
+  if (!attacker.isAlive || !isSwingActive(attacker, room.battleTicks)) return [];
+
+  const swingAngle = attacker.facingAngle;
+  const ax = attacker.x + Math.cos(swingAngle) * (PLAYER_RADIUS + 4);
+  const ay = attacker.y + Math.sin(swingAngle) * (PLAYER_RADIUS + 4);
+  const bx = ax + Math.cos(swingAngle) * BAT_LENGTH;
+  const by = ay + Math.sin(swingAngle) * BAT_LENGTH;
+  const hits = [];
+
+  getActivePlayers(room).forEach(victim => {
+    if (victim.id === attacker.id) return;
+    if (room.battleTicks < (victim.hitImmuneUntil || 0)) return;
+
+    const dist = segmentPointDistance(ax, ay, bx, by, victim.x, victim.y);
+    if (dist > PLAYER_RADIUS + BAT_HIT_WIDTH) return;
+
+    victim.hitImmuneUntil = room.battleTicks + BAT_HIT_IMMUNITY_TICKS;
+    victim.lastHitBy = attacker.id;
+    applyBatKnockback(victim, swingAngle);
+
+    attacker.knockouts = (attacker.knockouts || 0) + 1;
+    if (room.stats) room.stats.batHits += 1;
+
+    hits.push({
+      attackerId: attacker.id,
+      victimId: victim.id,
+      x: victim.x,
+      y: victim.y,
+      angle: swingAngle
+    });
+  });
+
+  if (hits.length) {
+    io.to(roomCode).emit('bat_hit', { hits });
+  }
+  return hits;
+}
+
+function processBatHits(room, roomCode) {
+  getActivePlayers(room).forEach(attacker => {
+    resolveBatHitsForAttacker(room, roomCode, attacker);
+  });
+}
+
+function separateBatArenaPlayers(alive) {
+  for (let i = 0; i < alive.length; i++) {
+    for (let j = i + 1; j < alive.length; j++) {
+      const p1 = alive[i];
+      const p2 = alive[j];
+      const dx = p2.x - p1.x;
+      const dy = p2.y - p1.y;
+      const dist = Math.hypot(dx, dy);
+      const minDist = PLAYER_RADIUS * 2.2;
+      if (dist >= minDist || dist < 0.01) continue;
+
+      const overlap = minDist - dist;
+      const nx = dx / dist;
+      const ny = dy / dist;
+      p1.x -= nx * (overlap / 2);
+      p1.y -= ny * (overlap / 2);
+      p2.x += nx * (overlap / 2);
+      p2.y += ny * (overlap / 2);
+    }
+  }
+}
+
+function startBatArenaPhysicsLoop(roomCode) {
+  const room = rooms[roomCode];
+  if (!room) return;
+
+  if (room.physicsIntervalId) clearInterval(room.physicsIntervalId);
+
+  io.to(roomCode).emit('battle_start', getRoomPayload(room));
+
+  room.physicsIntervalId = setInterval(() => {
+    updateBatArenaPhysics(roomCode);
+  }, 1000 / 60);
+}
+
+function updateBatArenaPhysics(roomCode) {
+  const room = rooms[roomCode];
+  if (!room || room.gameState !== 'BATTLE' || !isBatArena(room)) return;
+
+  room.battleTicks = (room.battleTicks || 0) + 1;
+  const alive = getActivePlayers(room);
+
+  tickBatArenaBots(room);
+
+  alive.forEach(p => {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= FRICTION;
+    p.vy *= FRICTION;
+    clampPlayerVelocity(p, BAT_MOVE_SPEED * 1.6);
+    if (Math.hypot(p.vx, p.vy) < 0.05) {
+      p.vx = 0;
+      p.vy = 0;
+    }
+    clampToArena(p);
+  });
+
+  separateBatArenaPlayers(alive);
+  processBatHits(room, roomCode);
+
+  alive.forEach(p => {
+    const distFromCenter = Math.hypot(p.x - ARENA_X, p.y - ARENA_Y);
+
+    if (distFromCenter >= BAT_BORDER_TOUCH_DIST && room.battleTicks >= (p.borderStrikeCooldownUntil || 0)) {
+      p.borderStrikes = (p.borderStrikes || 0) + 1;
+      p.borderStrikeCooldownUntil = room.battleTicks + BAT_BORDER_STRIKE_COOLDOWN_TICKS;
+
+      const nx = (p.x - ARENA_X) / (distFromCenter || 1);
+      const ny = (p.y - ARENA_Y) / (distFromCenter || 1);
+      const safeDist = ARENA_RADIUS - PLAYER_RADIUS - 32;
+      p.x = ARENA_X + nx * safeDist;
+      p.y = ARENA_Y + ny * safeDist;
+      p.vx = -nx * 4;
+      p.vy = -ny * 4;
+
+      io.to(roomCode).emit('border_strike', {
+        id: p.id,
+        name: p.name,
+        color: p.color,
+        strikes: p.borderStrikes,
+        maxStrikes: BORDER_STRIKES_TO_ELIMINATE
+      });
+
+      if (p.borderStrikes >= BORDER_STRIKES_TO_ELIMINATE) {
+        p.isAlive = false;
+        p.vx = 0;
+        p.vy = 0;
+        io.to(roomCode).emit('player_eliminated', {
+          id: p.id,
+          name: p.name,
+          color: p.color,
+          x: p.x,
+          y: p.y,
+          reason: 'strikes'
+        });
+      }
+    }
+  });
+
+  const stillAlive = getActivePlayers(room);
+  if (stillAlive.length <= 1) {
+    const winner = stillAlive[0] || null;
+    if (winner) winner.score += 1;
+    endMatch(roomCode, winner);
+    return;
+  }
+
+  io.to(roomCode).emit('physics_update', {
+    players: Object.values(room.players).map(p => ({
+      id: p.id,
+      x: p.x,
+      y: p.y,
+      vx: p.vx,
+      vy: p.vy,
+      isAlive: p.isAlive,
+      facingAngle: p.facingAngle,
+      borderStrikes: p.borderStrikes || 0,
+      swingActiveUntil: p.swingActiveUntil || 0
+    })),
+    collisions: [],
+    battleTicks: room.battleTicks
+  });
+}
+
+function runBatArenaBotAI(room) {
+  const bots = Object.values(room.players).filter(p => p.isBot && p.isAlive);
+  const humans = Object.values(room.players).filter(p => !p.isBot && p.isAlive);
+
+  bots.forEach(bot => {
+    let target = null;
+    if (humans.length > 0) {
+      target = humans[Math.floor(Math.random() * humans.length)];
+    } else {
+      const others = bots.filter(b => b.id !== bot.id);
+      if (others.length) target = others[Math.floor(Math.random() * others.length)];
+    }
+
+    if (target) {
+      bot.facingAngle = Math.atan2(target.y - bot.y, target.x - bot.x);
+      bot.angle = bot.facingAngle;
+    }
+  });
+}
+
+function tickBatArenaBots(room) {
+  if (room.battleTicks % 4 !== 0) return;
+
+  const bots = Object.values(room.players).filter(p => p.isBot && p.isAlive);
+  const targets = getActivePlayers(room).filter(p => !p.isBot || bots.length > 1);
+
+  bots.forEach(bot => {
+    const others = targets.filter(t => t.id !== bot.id);
+    if (!others.length) return;
+
+    const target = others.reduce((best, p) => {
+      const d = Math.hypot(p.x - bot.x, p.y - bot.y);
+      return d < best.dist ? { p, dist: d } : best;
+    }, { p: others[0], dist: Infinity }).p;
+
+    const dx = target.x - bot.x;
+    const dy = target.y - bot.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    bot.facingAngle = Math.atan2(dy, dx);
+    bot.angle = bot.facingAngle;
+
+    if (dist > BAT_LENGTH * 0.85) {
+      bot.vx += (dx / dist) * BAT_MOVE_SPEED * 0.85;
+      bot.vy += (dy / dist) * BAT_MOVE_SPEED * 0.85;
+      clampPlayerVelocity(bot, BAT_MOVE_SPEED);
+    } else if (room.battleTicks >= bot.swingCooldownUntil) {
+      bot.swingActiveFrom = room.battleTicks;
+      bot.swingActiveUntil = room.battleTicks + BAT_SWING_DURATION_TICKS;
+      bot.swingCooldownUntil = room.battleTicks + BAT_SWING_COOLDOWN_TICKS;
+      resolveBatHitsForAttacker(room, room.code, bot);
+    }
   });
 }
 
@@ -211,12 +592,14 @@ function getRoomPayload(room) {
   const tournamentRemaining = getTournamentPlayers(room).length;
   return {
     code: room.code,
+    gameMode: room.gameMode || 'TOURNAMENT',
     gameState: room.gameState,
     countdown: room.countdown,
     stats: room.stats,
     tournamentRound: room.tournamentRound || 1,
     eliminationsNeeded: room.eliminationsNeeded || 0,
     tournamentRemaining,
+    borderStrikesToEliminate: BORDER_STRIKES_TO_ELIMINATE,
     players: Object.values(room.players).map(p => ({
       id: p.id,
       name: p.name,
@@ -232,7 +615,9 @@ function getRoomPayload(room) {
       vy: p.vy,
       angle: p.angle,
       force: p.force,
-      score: p.score
+      score: p.score,
+      borderStrikes: p.borderStrikes || 0,
+      facingAngle: p.facingAngle ?? p.angle ?? 0
     }))
   };
 }
@@ -519,40 +904,29 @@ io.on('connection', (socket) => {
   console.log(`Socket connected: ${socket.id}`);
 
   // Create Room
-  socket.on('create_room', ({ playerName, playerColor }) => {
+  socket.on('create_room', ({ playerName, playerColor, gameMode }) => {
     const roomCode = generateRoomCode();
     socket.join(roomCode);
+    const mode = gameMode === 'BAT_ARENA' ? 'BAT_ARENA' : 'TOURNAMENT';
 
     rooms[roomCode] = {
       code: roomCode,
+      gameMode: mode,
       players: {},
       gameState: 'LOBBY',
-      countdown: AIM_COUNTDOWN_SECONDS,
+      countdown: mode === 'BAT_ARENA' ? BAT_ARENA_COUNTDOWN_SECONDS : AIM_COUNTDOWN_SECONDS,
       timerId: null,
       physicsIntervalId: null,
       battleTicks: 0,
       stats: { collisions: 0 }
     };
 
-    rooms[roomCode].players[socket.id] = {
+    rooms[roomCode].players[socket.id] = createDefaultPlayerState({
       id: socket.id,
       name: playerName || 'Player 1',
       color: playerColor || '#00f0ff',
-      isReady: false,
-      isHost: true,
-      isBot: false,
-      isAlive: true,
-      x: ARENA_X,
-      y: ARENA_Y,
-      vx: 0,
-      vy: 0,
-      angle: 0,
-      force: 0.5,
-      score: 0,
-      maxSpeed: 0,
-      knockouts: 0,
-      inTournament: true
-    };
+      isHost: true
+    });
 
     socket.emit('room_created', getRoomPayload(rooms[roomCode]));
     console.log(`Room created: ${roomCode} by ${playerName}`);
@@ -573,32 +947,19 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (Object.keys(room.players).length >= TARGET_TOURNAMENT_SIZE) {
-      socket.emit('error_message', `Room is full (max ${TARGET_TOURNAMENT_SIZE} players).`);
+    const maxPlayers = isBatArena(room) ? BAT_ARENA_MAX_PLAYERS : TARGET_TOURNAMENT_SIZE;
+    if (Object.keys(room.players).length >= maxPlayers) {
+      socket.emit('error_message', `Room is full (max ${maxPlayers} players).`);
       return;
     }
 
     socket.join(code);
 
-    room.players[socket.id] = {
+    room.players[socket.id] = createDefaultPlayerState({
       id: socket.id,
       name: playerName || `Player ${Object.keys(room.players).length + 1}`,
-      color: playerColor || '#ff2a5f',
-      isReady: false,
-      isHost: false,
-      isBot: false,
-      isAlive: true,
-      x: ARENA_X,
-      y: ARENA_Y,
-      vx: 0,
-      vy: 0,
-      angle: 0,
-      force: 0.5,
-      score: 0,
-      maxSpeed: 0,
-      knockouts: 0,
-      inTournament: true
-    };
+      color: playerColor || '#ff2a5f'
+    });
 
     console.log(`${playerName} joined room ${code}`);
     socket.emit('room_joined', getRoomPayload(room));
@@ -614,8 +975,9 @@ io.on('connection', (socket) => {
     const requester = room.players[socket.id];
     if (!requester || !requester.isHost) return;
 
-    if (Object.keys(room.players).length >= TARGET_TOURNAMENT_SIZE) {
-      socket.emit('error_message', `Room is full (max ${TARGET_TOURNAMENT_SIZE} players).`);
+    const maxPlayers = isBatArena(room) ? BAT_ARENA_MAX_PLAYERS : TARGET_TOURNAMENT_SIZE;
+    if (Object.keys(room.players).length >= maxPlayers) {
+      socket.emit('error_message', `Room is full (max ${maxPlayers} players).`);
       return;
     }
 
@@ -626,25 +988,13 @@ io.on('connection', (socket) => {
     const name = BOT_NAMES[botIndex % BOT_NAMES.length];
     const color = BOT_COLORS[botIndex % BOT_COLORS.length];
 
-    room.players[botId] = {
+    room.players[botId] = createDefaultPlayerState({
       id: botId,
       name: `${name} (Bot)`,
       color: color,
-      isReady: true, // Bots are always ready!
-      isHost: false,
-      isBot: true,
-      isAlive: true,
-      x: ARENA_X,
-      y: ARENA_Y,
-      vx: 0,
-      vy: 0,
-      angle: 0,
-      force: 0.5,
-      score: 0,
-      maxSpeed: 0,
-      knockouts: 0,
-      inTournament: true
-    };
+      isReady: true,
+      isBot: true
+    });
 
     console.log(`Bot added to room ${roomCode}: ${name}`);
     broadcastRoomUpdate(roomCode);
@@ -702,8 +1052,63 @@ io.on('connection', (socket) => {
       return;
     }
 
-    initializeTournament(room);
-    beginRoundAiming(roomCode);
+    if (isBatArena(room)) {
+      initializeBatArena(room);
+      beginBatArenaBattle(roomCode);
+    } else {
+      initializeTournament(room);
+      beginRoundAiming(roomCode);
+    }
+  });
+
+  socket.on('set_game_mode', ({ roomCode, gameMode }) => {
+    const room = rooms[roomCode];
+    if (!room || room.gameState !== 'LOBBY') return;
+    const host = room.players[socket.id];
+    if (!host || !host.isHost) return;
+    room.gameMode = gameMode === 'BAT_ARENA' ? 'BAT_ARENA' : 'TOURNAMENT';
+    broadcastRoomUpdate(roomCode);
+  });
+
+  socket.on('player_move', ({ roomCode, dx, dy, facingAngle }) => {
+    const room = rooms[roomCode];
+    if (!room || room.gameState !== 'BATTLE' || !isBatArena(room)) return;
+
+    const player = room.players[socket.id];
+    if (!player || !player.isAlive) return;
+
+    const len = Math.hypot(dx, dy);
+    if (len > 0.01) {
+      const nx = dx / len;
+      const ny = dy / len;
+      player.vx += nx * BAT_MOVE_SPEED;
+      player.vy += ny * BAT_MOVE_SPEED;
+      clampPlayerVelocity(player, BAT_MOVE_SPEED);
+      player.facingAngle = typeof facingAngle === 'number' ? facingAngle : Math.atan2(ny, nx);
+      player.angle = player.facingAngle;
+    } else if (typeof facingAngle === 'number') {
+      player.facingAngle = facingAngle;
+      player.angle = facingAngle;
+    }
+  });
+
+  socket.on('bat_swing', ({ roomCode, angle }) => {
+    const room = rooms[roomCode];
+    if (!room || room.gameState !== 'BATTLE' || !isBatArena(room)) return;
+
+    const player = room.players[socket.id];
+    if (!player || !player.isAlive) return;
+    if (room.battleTicks < (player.swingCooldownUntil || 0)) return;
+
+    const swingAngle = typeof angle === 'number' ? angle : player.facingAngle;
+    player.facingAngle = swingAngle;
+    player.angle = swingAngle;
+    player.swingActiveFrom = room.battleTicks;
+    player.swingActiveUntil = room.battleTicks + BAT_SWING_DURATION_TICKS;
+    player.swingCooldownUntil = room.battleTicks + BAT_SWING_COOLDOWN_TICKS;
+
+    resolveBatHitsForAttacker(room, roomCode, player);
+    io.to(roomCode).emit('bat_swing', { id: socket.id, angle: swingAngle });
   });
 
   // Receive Aim input from active player
@@ -765,6 +1170,13 @@ io.on('connection', (socket) => {
       player.maxSpeed = 0;
       player.knockouts = 0;
       player.eliminatedAtTick = null;
+      player.borderStrikes = 0;
+      player.swingActiveFrom = 0;
+      player.swingActiveUntil = 0;
+      player.swingCooldownUntil = 0;
+      player.hitImmuneUntil = 0;
+      player.borderStrikeCooldownUntil = 0;
+      player.lastHitBy = null;
     });
 
     console.log(`Room restarted: ${roomCode}`);
@@ -802,14 +1214,23 @@ io.on('connection', (socket) => {
 
           // If in BATTLE or AIMING, check if the game is still playable
           if (room.gameState === 'BATTLE') {
-            const tournamentAlive = players.filter(p => p.inTournament && p.isAlive);
-            const eliminatedThisRound = room.roundAliveCount - tournamentAlive.length;
-            if (eliminatedThisRound >= room.eliminationsNeeded) {
-              endBattleRound(roomCode);
-            } else if (getTournamentPlayers(room).length <= 1) {
-              const winner = getTournamentPlayers(room)[0];
-              if (winner) winner.score += 1;
-              endMatch(roomCode, winner || null);
+            if (isBatArena(room)) {
+              const alive = getActivePlayers(room);
+              if (alive.length <= 1) {
+                const winner = alive[0];
+                if (winner) winner.score += 1;
+                endMatch(roomCode, winner || null);
+              }
+            } else {
+              const tournamentAlive = players.filter(p => p.inTournament && p.isAlive);
+              const eliminatedThisRound = room.roundAliveCount - tournamentAlive.length;
+              if (eliminatedThisRound >= room.eliminationsNeeded) {
+                endBattleRound(roomCode);
+              } else if (getTournamentPlayers(room).length <= 1) {
+                const winner = getTournamentPlayers(room)[0];
+                if (winner) winner.score += 1;
+                endMatch(roomCode, winner || null);
+              }
             }
           }
 
