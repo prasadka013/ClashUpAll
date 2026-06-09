@@ -103,10 +103,11 @@ const moveKeys = { w: false, a: false, s: false, d: false, ArrowUp: false, Arrow
 let lastMoveSentTime = 0;
 let lastSwingSentTime = 0;
 let spaceSwingHeld = false;
+let pointerFacingAngle = null;
 
 const MODE_TIPS = {
-  BAT_ARENA: 'Bat Arena: free-for-all brawl. Swing your bat to knock pilots toward the ring — 3 ring touches eliminates them. Last one standing wins.',
-  TOURNAMENT: 'Tournament mode: up to 6 pilots. Each round eliminates 2 until one champion remains. Add bots to fill the bracket.'
+  BAT_ARENA: 'Bat Arena: free-for-all brawl. Swing your bat to knock pilots off the platform into the water. Last one standing wins.',
+  TOURNAMENT: 'Tournament mode: aim every volley, launch together, collide, and survive. Nobody is judged by center distance - only falling from the platform eliminates.'
 };
 
 function isBatArenaMode(room = currentRoom) {
@@ -127,12 +128,14 @@ function syncBatArenaHud() {
   const me = localPlayers[myId];
   const maxStrikes = currentRoom?.borderStrikesToEliminate || 3;
   const strikes = me?.borderStrikes || 0;
+  const strikesLabel = hudStrikesWrap?.querySelector('.hud-label');
+  if (strikesLabel) strikesLabel.innerText = maxStrikes <= 1 ? 'FALLS' : 'STRIKES';
   hudStrikesText.innerText = `${strikes}/${maxStrikes}`;
   const alive = Object.values(localPlayers).filter(p => p.isAlive).length;
   const total = Object.values(localPlayers).length;
   hudAliveCount.innerText = `${alive}/${total}`;
   hudRoundLabel.innerText = 'BAT ARENA';
-  hudRoundSub.innerText = 'WASD move · Left-click or Space to swing';
+  hudRoundSub.innerText = 'WASD move - left-click or Space to knock rivals into the water';
   hudRoundBanner.classList.remove('hidden');
 }
 
@@ -334,10 +337,9 @@ socket.on('room_updated', (room) => {
 function syncTournamentHud(room) {
   const round = room.tournamentRound || 1;
   const remaining = room.tournamentRemaining ?? Object.values(localPlayers).filter(p => p.inTournament !== false).length;
-  const elimTarget = room.eliminationsNeeded || 2;
   hudRoundText.innerText = String(round);
-  hudRoundLabel.innerText = `ROUND ${round}`;
-  hudRoundSub.innerText = `${remaining} pilots · eliminate ${elimTarget}`;
+  hudRoundLabel.innerText = `VOLLEY ${round}`;
+  hudRoundSub.innerText = `${remaining} pilots - fall from the platform to be eliminated`;
   hudRoundBanner.classList.remove('hidden');
 }
 
@@ -380,7 +382,7 @@ socket.on('aiming_start', (room) => {
   updateHudForMode(room);
   if (isBatArenaMode(room)) {
     syncBatArenaHud();
-    if (aimingSubtext) aimingSubtext.innerText = 'Get ready — WASD to move, left-click or Space to swing';
+    if (aimingSubtext) aimingSubtext.innerText = 'Get ready - WASD to move, left-click or Space to knock rivals into the water';
   } else {
     syncTournamentHud(room);
     if (aimingSubtext) aimingSubtext.innerText = 'AIM WITH MOUSE OR TOUCH DRAG';
@@ -415,14 +417,16 @@ socket.on('player_aim_updated', ({ id, angle, force }) => {
 socket.on('round_ended', ({ round, nextRound, eliminated, remaining, eliminationsNeeded, room }) => {
   currentRoom = room;
   currentPhase = 'INTERMISSION';
-  hudPhaseText.innerText = 'NEXT ROUND';
+  hudPhaseText.innerText = 'NEXT VOLLEY';
   hudPhaseText.className = 'hud-value neon-gold';
   syncTournamentHud({ ...room, tournamentRound: nextRound, tournamentRemaining: remaining, eliminationsNeeded });
 
   if (eliminated.length) {
-    addFeedItem(`${eliminated.join(', ')}`, COLORS.pink, `OUT — ${remaining} remain for Round ${nextRound}`);
+    addFeedItem(`${eliminated.join(', ')}`, COLORS.pink, `FELL - ${remaining} remain for Volley ${nextRound}`);
+  } else {
+    addFeedItem('No falls', COLORS.cyan, `everyone survived - Volley ${nextRound}`);
   }
-  showToast(`Round ${round} complete! ${remaining} pilots advance.`);
+  showToast(eliminated.length ? `Volley ${round}: ${remaining} pilots remain.` : `Volley ${round}: everyone survived.`);
 });
 
 socket.on('battle_start', (room) => {
@@ -521,8 +525,8 @@ socket.on('player_eliminated', ({ id, name, color, x, y, reason }) => {
   spawnBoundaryShockwave(x, y, color);
 
   const detail = reason === 'strikes'
-    ? 'took <span style="color: #ff2a5f; font-weight: 800;">3 RING STRIKES</span> & was eliminated'
-    : 'crossed boundary & was <span style="color: #ff2a5f; font-weight: 800;">ELIMINATED</span>';
+    ? 'fell from the platform into the water & was <span style="color: #ff2a5f; font-weight: 800;">ELIMINATED</span>'
+    : 'fell from the platform into the water & was <span style="color: #ff2a5f; font-weight: 800;">ELIMINATED</span>';
   addFeedItem(name, color, detail);
 
   if (isBatArenaMode()) syncBatArenaHud();
@@ -695,7 +699,10 @@ function displayGameOver(winner, stats = {}) {
     winnerCircle.style.color = winner.color;
     winnerCircle.classList.remove('hidden');
     winnerName.innerText = winner.name;
-    winnerStats.innerText = `Collisions: ${stats.collisions || 0} | Max speed: ${(stats.maxSpeed || 0).toFixed(1)} | Top knockouts: ${stats.knockouts || 0}`;
+    const primaryStat = isBatArenaMode(currentRoom)
+      ? `Bat hits: ${stats.batHits || 0}`
+      : `Collisions: ${stats.collisions || 0}`;
+    winnerStats.innerText = `${primaryStat} | Max speed: ${(stats.maxSpeed || 0).toFixed(1)} | Knockouts: ${stats.knockouts || 0}`;
   } else {
     modalTitle.innerText = 'MUTUAL DESTRUCTION';
     modalTitle.style.color = COLORS.pink;
@@ -863,7 +870,7 @@ function buildIceArena() {
     transparent: true,
     opacity: 0.88
   });
-  const wallCount = 28;
+  const wallCount = 0;
   for (let i = 0; i < wallCount; i++) {
     const angle = (i / wallCount) * Math.PI * 2;
     const block = new THREE.Mesh(new THREE.BoxGeometry(36, 28, 36), iceWallMat);
@@ -892,7 +899,7 @@ function buildIceArena() {
     new THREE.MeshStandardMaterial({ color: 0x5eb8e8, roughness: 0.1, metalness: 0.2, transparent: true, opacity: 0.55 })
   );
   waterPlane.rotation.x = -Math.PI / 2;
-  waterPlane.position.y = -18;
+  waterPlane.position.y = -42;
   scene.add(waterPlane);
 }
 
@@ -1289,12 +1296,12 @@ function sendBatArenaInput() {
   if (now - lastMoveSentTime < 33) return;
   lastMoveSentTime = now;
 
-  let facingAngle = me.facingAngle ?? me.angle ?? 0;
-  if (Math.hypot(dx, dy) > 0.01) {
+  let facingAngle = pointerFacingAngle ?? me.facingAngle ?? me.angle ?? 0;
+  if (Math.hypot(dx, dy) > 0.01 && pointerFacingAngle === null) {
     facingAngle = Math.atan2(dy, dx);
-    me.facingAngle = facingAngle;
-    me.angle = facingAngle;
   }
+  me.facingAngle = facingAngle;
+  me.angle = facingAngle;
 
   socket.emit('player_move', {
     roomCode: currentRoom.code,
@@ -1320,6 +1327,7 @@ function tryBatSwing(worldPoint) {
     const dy = serverPoint.y - me.y;
     if (Math.hypot(dx, dy) > 8) {
       angle = Math.atan2(dy, dx);
+      pointerFacingAngle = angle;
     }
   }
 
@@ -1400,6 +1408,21 @@ function arenaPointFromPointer(e) {
   return hit;
 }
 
+function updateBatFacingFromPointer(e) {
+  if (activeScreen !== 'game' || currentPhase !== 'BATTLE' || !isBatArenaMode()) return;
+  const me = localPlayers[myId];
+  if (!me || !me.isAlive) return;
+  const hit = arenaPointFromPointer(e);
+  if (!hit) return;
+  const serverPoint = worldToServer(hit);
+  const dx = serverPoint.x - me.x;
+  const dy = serverPoint.y - me.y;
+  if (Math.hypot(dx, dy) <= 8) return;
+  pointerFacingAngle = Math.atan2(dy, dx);
+  me.facingAngle = pointerFacingAngle;
+  me.angle = pointerFacingAngle;
+}
+
 function projectedPlayerDistance(player, eventPoint) {
   const world = serverToWorld(player.x, player.y);
   world.y = 34;
@@ -1433,6 +1456,11 @@ function startAimDrag(e) {
 }
 
 function continueAimDrag(e) {
+  if (currentPhase === 'BATTLE' && isBatArenaMode() && !isOrbitingCamera) {
+    updateBatFacingFromPointer(e);
+    return;
+  }
+
   if (isDraggingAim && currentPhase === 'AIMING') {
     updateAimVector(e);
     return;
@@ -1458,6 +1486,7 @@ function updateAimVector(e) {
   if (!me || !me.isAlive || !currentRoom) return;
 
   const hit = arenaPointFromPointer(e);
+  if (!hit) return;
   const serverPoint = worldToServer(hit);
   const dx = serverPoint.x - me.x;
   const dy = serverPoint.y - me.y;

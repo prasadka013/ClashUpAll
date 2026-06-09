@@ -119,7 +119,7 @@
             <h3>READY SEQUENCE</h3>
           </div>
           <div class="controls-status">
-            <p id="lobby-mode-tip" class="status-tip">Bat Arena: free-for-all brawl. Knock pilots toward the ring with your bat — 3 ring touches eliminates them. Last one standing wins.</p>
+            <p id="lobby-mode-tip" class="status-tip">Bat Arena: free-for-all brawl. Knock pilots off the platform into the water. Last one standing wins.</p>
             <div id="host-mode-picker" class="input-group hidden">
               <label for="lobby-game-mode">ROOM MODE (HOST)</label>
               <select id="lobby-game-mode" class="mode-select">
@@ -154,11 +154,11 @@
           <span id="hud-code-text">ABCD</span>
         </div>
         <div class="hud-item" id="hud-strikes-wrap">
-          <span class="hud-label">STRIKES</span>
-          <span id="hud-strikes-text" class="hud-value neon-gold">0/3</span>
+          <span class="hud-label">FALLS</span>
+          <span id="hud-strikes-text" class="hud-value neon-gold">0/1</span>
         </div>
         <div class="hud-item" id="hud-round-wrap">
-          <span class="hud-label">ROUND</span>
+          <span class="hud-label">VOLLEY</span>
           <span id="hud-round-text" class="hud-value neon-gold">1</span>
         </div>
         <div class="hud-item">
@@ -168,8 +168,8 @@
       </div>
 
       <div id="hud-round-banner" class="hud-round-banner hidden">
-        <span id="hud-round-label">ROUND 1</span>
-        <span id="hud-round-sub">6 pilots · eliminate 2</span>
+        <span id="hud-round-label">VOLLEY 1</span>
+        <span id="hud-round-sub">Survive the platform</span>
       </div>
 
       <!-- Main Game Canvas Container -->
@@ -178,7 +178,7 @@
         
         <!-- Big countdown inside Canvas coordinates -->
         <div id="aiming-countdown" class="aiming-countdown hidden">
-          <h2 id="countdown-number">15</h2>
+          <h2 id="countdown-number">6</h2>
           <p id="aiming-subtext" class="aiming-subtext">AIM WITH MOUSE OR TOUCH DRAG</p>
         </div>
       </div>

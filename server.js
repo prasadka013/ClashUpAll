@@ -24,12 +24,12 @@ const ARENA_Y = 400;
 const ARENA_RADIUS = 300;
 const PLAYER_RADIUS = 20;
 const SPAWN_RADIUS = 120; // Radius of circle where players spawn in the center
-const BASE_MAX_VELOCITY = 9; // Max launch speed (lower = gentler openings)
-const MAX_BATTLE_SPEED = 11; // Hard cap while sliding after hits
+const BASE_MAX_VELOCITY = 11; // Max launch speed (lower = gentler openings)
+const MAX_BATTLE_SPEED = 14; // Hard cap while sliding after hits
 const FRICTION = 0.972; // Stronger damping per tick
 const BOUNCE_RESTITUTION = 0.72; // Softer bounces (no energy gain on impact)
 const COLLISION_IMPULSE_SCALE = 0.38; // Extra dampening on player-vs-player hits
-const AIM_COUNTDOWN_SECONDS = 15;
+const AIM_COUNTDOWN_SECONDS = 6;
 const BAT_ARENA_COUNTDOWN_SECONDS = 5;
 const ROUND_INTERMISSION_MS = 4000;
 const TARGET_TOURNAMENT_SIZE = 6;
@@ -43,10 +43,12 @@ const BAT_SWING_DURATION_TICKS = 18;
 const BAT_SWING_COOLDOWN_TICKS = 22;
 const BAT_HIT_IMMUNITY_TICKS = 24;
 const BAT_BORDER_STRIKE_COOLDOWN_TICKS = 75;
-const BORDER_STRIKES_TO_ELIMINATE = 3;
-const BAT_BORDER_TOUCH_DIST = ARENA_RADIUS - 18;
-const BAT_KNOCKBACK = 13;
-const BAT_MAX_KNOCKBACK_SPEED = 16;
+const BORDER_STRIKES_TO_ELIMINATE = 1;
+const BAT_BORDER_TOUCH_DIST = ARENA_RADIUS - PLAYER_RADIUS;
+const BAT_RECENT_HIT_WINDOW_TICKS = 210;
+const BAT_KNOCKBACK = 15.5;
+const BAT_MAX_KNOCKBACK_SPEED = 18;
+const BAT_HIT_ARC_RADIANS = Math.PI * 0.72;
 
 // Rooms state store
 // Room Code -> { code, players: { socketId: playerState }, gameState: 'LOBBY'|'AIMING'|'BATTLE'|'GAMEOVER', countdown, timerId, physicsIntervalId, battleTicks }
@@ -101,6 +103,7 @@ function createDefaultPlayerState(overrides = {}) {
     hitImmuneUntil: 0,
     borderStrikeCooldownUntil: 0,
     lastHitBy: null,
+    lastHitTick: -Infinity,
     ...overrides
   };
 }
@@ -141,41 +144,35 @@ function spawnTournamentPlayers(room) {
   });
 }
 
+function prepareTournamentVolleyPlayers(room, shouldSpawn) {
+  if (shouldSpawn) {
+    spawnTournamentPlayers(room);
+    room.hasTournamentSpawned = true;
+    return;
+  }
+
+  getTournamentPlayers(room).forEach(player => {
+    player.vx = 0;
+    player.vy = 0;
+    player.isAlive = true;
+    player.force = 0.5;
+    player.maxSpeed = 0;
+    player.eliminatedAtTick = null;
+  });
+}
+
 function initializeTournament(room) {
   const players = Object.values(room.players);
   room.tournamentRound = 1;
+  room.hasTournamentSpawned = false;
   players.forEach(player => {
     player.inTournament = true;
     player.knockouts = 0;
+    player.lastHitBy = null;
+    player.lastHitTick = -Infinity;
   });
   room.roundAliveCount = players.length;
-  room.eliminationsNeeded = getRoundEliminationTarget(room.roundAliveCount);
-}
-
-function forceEliminateFurthest(room, count) {
-  const roomCode = room.code;
-  const alive = getTournamentPlayers(room).filter(p => p.isAlive);
-  const sorted = alive
-    .map(p => ({
-      player: p,
-      dist: Math.hypot(p.x - ARENA_X, p.y - ARENA_Y)
-    }))
-    .sort((a, b) => b.dist - a.dist);
-
-  sorted.slice(0, count).forEach(({ player }) => {
-    if (!player.isAlive) return;
-    player.isAlive = false;
-    player.vx = 0;
-    player.vy = 0;
-    player.eliminatedAtTick = room.battleTicks;
-    io.to(roomCode).emit('player_eliminated', {
-      id: player.id,
-      name: player.name,
-      color: player.color,
-      x: player.x,
-      y: player.y
-    });
-  });
+  room.eliminationsNeeded = 0;
 }
 
 function spawnBatArenaPlayers(room) {
@@ -197,6 +194,7 @@ function spawnBatArenaPlayers(room) {
     player.hitImmuneUntil = 0;
     player.borderStrikeCooldownUntil = 0;
     player.lastHitBy = null;
+    player.lastHitTick = -Infinity;
     player.inTournament = true;
   });
 }
@@ -275,13 +273,26 @@ function segmentPointDistance(ax, ay, bx, by, px, py) {
   return Math.hypot(px - cx, py - cy);
 }
 
+function angleDelta(a, b) {
+  return Math.atan2(Math.sin(a - b), Math.cos(a - b));
+}
+
 function isSwingActive(attacker, battleTicks) {
   return battleTicks >= (attacker.swingActiveFrom || 0) && battleTicks <= (attacker.swingActiveUntil || 0);
 }
 
-function applyBatKnockback(victim, swingAngle) {
-  victim.vx += Math.cos(swingAngle) * BAT_KNOCKBACK;
-  victim.vy += Math.sin(swingAngle) * BAT_KNOCKBACK;
+function applyBatKnockback(attacker, victim, swingAngle) {
+  const awayAngle = Math.atan2(victim.y - attacker.y, victim.x - attacker.x);
+  const blendedX = Math.cos(swingAngle) * 0.78 + Math.cos(awayAngle) * 0.22;
+  const blendedY = Math.sin(swingAngle) * 0.78 + Math.sin(awayAngle) * 0.22;
+  const len = Math.hypot(blendedX, blendedY) || 1;
+  const nx = blendedX / len;
+  const ny = blendedY / len;
+
+  victim.vx += nx * BAT_KNOCKBACK;
+  victim.vy += ny * BAT_KNOCKBACK;
+  victim.x += nx * 8;
+  victim.y += ny * 8;
   clampPlayerVelocity(victim, BAT_MAX_KNOCKBACK_SPEED);
 }
 
@@ -299,14 +310,17 @@ function resolveBatHitsForAttacker(room, roomCode, attacker) {
     if (victim.id === attacker.id) return;
     if (room.battleTicks < (victim.hitImmuneUntil || 0)) return;
 
+    const toVictimAngle = Math.atan2(victim.y - attacker.y, victim.x - attacker.x);
+    const forwardArcHit = Math.abs(angleDelta(toVictimAngle, swingAngle)) <= BAT_HIT_ARC_RADIANS / 2 &&
+      Math.hypot(victim.x - attacker.x, victim.y - attacker.y) <= BAT_LENGTH + PLAYER_RADIUS + BAT_HIT_WIDTH;
     const dist = segmentPointDistance(ax, ay, bx, by, victim.x, victim.y);
-    if (dist > PLAYER_RADIUS + BAT_HIT_WIDTH) return;
+    if (!forwardArcHit && dist > PLAYER_RADIUS + BAT_HIT_WIDTH) return;
 
     victim.hitImmuneUntil = room.battleTicks + BAT_HIT_IMMUNITY_TICKS;
     victim.lastHitBy = attacker.id;
-    applyBatKnockback(victim, swingAngle);
+    victim.lastHitTick = room.battleTicks;
+    applyBatKnockback(attacker, victim, swingAngle);
 
-    attacker.knockouts = (attacker.knockouts || 0) + 1;
     if (room.stats) room.stats.batHits += 1;
 
     hits.push({
@@ -384,7 +398,7 @@ function updateBatArenaPhysics(roomCode) {
       p.vx = 0;
       p.vy = 0;
     }
-    clampToArena(p);
+    p.maxSpeed = Math.max(p.maxSpeed || 0, Math.hypot(p.vx, p.vy));
   });
 
   separateBatArenaPlayers(alive);
@@ -394,6 +408,12 @@ function updateBatArenaPhysics(roomCode) {
     const distFromCenter = Math.hypot(p.x - ARENA_X, p.y - ARENA_Y);
 
     if (distFromCenter >= BAT_BORDER_TOUCH_DIST && room.battleTicks >= (p.borderStrikeCooldownUntil || 0)) {
+      const wasRecentlyHit = p.lastHitBy && room.battleTicks - (p.lastHitTick || -Infinity) <= BAT_RECENT_HIT_WINDOW_TICKS;
+      if (!wasRecentlyHit) {
+        clampToArena(p);
+        return;
+      }
+
       p.borderStrikes = (p.borderStrikes || 0) + 1;
       p.borderStrikeCooldownUntil = room.battleTicks + BAT_BORDER_STRIKE_COOLDOWN_TICKS;
 
@@ -417,6 +437,10 @@ function updateBatArenaPhysics(roomCode) {
         p.isAlive = false;
         p.vx = 0;
         p.vy = 0;
+        const attacker = room.players[p.lastHitBy];
+        if (attacker && attacker.id !== p.id) {
+          attacker.knockouts = (attacker.knockouts || 0) + 1;
+        }
         io.to(roomCode).emit('player_eliminated', {
           id: p.id,
           name: p.name,
@@ -426,6 +450,8 @@ function updateBatArenaPhysics(roomCode) {
           reason: 'strikes'
         });
       }
+    } else if (distFromCenter > BAT_BORDER_TOUCH_DIST) {
+      clampToArena(p);
     }
   });
 
@@ -523,9 +549,9 @@ function beginRoundAiming(roomCode) {
   room.battleTicks = 0;
   room.stats = { collisions: 0 };
   room.roundAliveCount = competitors.length;
-  room.eliminationsNeeded = getRoundEliminationTarget(room.roundAliveCount);
+  room.eliminationsNeeded = 0;
 
-  spawnTournamentPlayers(room);
+  prepareTournamentVolleyPlayers(room, !room.hasTournamentSpawned);
   io.to(roomCode).emit('aiming_start', getRoomPayload(room));
 
   if (room.timerId) clearInterval(room.timerId);
@@ -543,7 +569,7 @@ function beginRoundAiming(roomCode) {
   }, 1000);
 }
 
-function endBattleRound(roomCode) {
+function endTournamentVolley(roomCode) {
   const room = rooms[roomCode];
   if (!room) return;
 
@@ -575,7 +601,7 @@ function endBattleRound(roomCode) {
     nextRound: room.tournamentRound,
     eliminated: eliminatedNames,
     remaining: remaining.length,
-    eliminationsNeeded: getRoundEliminationTarget(remaining.length),
+    eliminationsNeeded: 0,
     room: getRoomPayload(room)
   });
 
@@ -725,6 +751,10 @@ function updatePhysics(roomCode) {
           p2.vy += impulse * ny;
           clampPlayerVelocity(p1);
           clampPlayerVelocity(p2);
+          p1.lastHitBy = p2.id;
+          p2.lastHitBy = p1.id;
+          p1.lastHitTick = room.battleTicks;
+          p2.lastHitTick = room.battleTicks;
 
           // Save collision event data for clients to render particle impact sparks
           collisions.push({
@@ -755,9 +785,11 @@ function updatePhysics(roomCode) {
       p.vy = 0;
       p.eliminatedAtTick = room.battleTicks;
 
-      const lastTouch = players
-        .filter(other => other.id !== p.id && other.isAlive)
-        .sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y) - Math.hypot(b.x - p.x, b.y - p.y))[0];
+      const lastTouch = p.lastHitBy && players.find(other => other.id === p.lastHitBy)
+        ? players.find(other => other.id === p.lastHitBy)
+        : players
+          .filter(other => other.id !== p.id && other.isAlive)
+          .sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y) - Math.hypot(b.x - p.x, b.y - p.y))[0];
 
       if (lastTouch) {
         lastTouch.knockouts = (lastTouch.knockouts || 0) + 1;
@@ -774,17 +806,19 @@ function updatePhysics(roomCode) {
     }
   });
 
-  // 4. Tournament round progression (eliminate N per round until one champion)
+  // 4. Tournament volley progression. Nobody is judged by center distance:
+  // if nobody falls, everyone aims again; if someone falls, only they are out.
   const tournamentAlive = getTournamentPlayers(room).filter(p => p.isAlive);
-  const eliminatedThisRound = room.roundAliveCount - tournamentAlive.length;
-
-  if (eliminatedThisRound >= room.eliminationsNeeded) {
-    endBattleRound(roomCode);
-    return;
-  }
 
   if (tournamentAlive.length === 0) {
     endMatch(roomCode, null);
+    return;
+  }
+
+  if (tournamentAlive.length === 1) {
+    const winner = tournamentAlive[0];
+    winner.score += 1;
+    endMatch(roomCode, winner);
     return;
   }
 
@@ -793,23 +827,8 @@ function updatePhysics(roomCode) {
     tournamentAlive.every(p => Math.hypot(p.vx, p.vy) === 0) &&
     room.battleTicks > 150
   ) {
-    const stillNeeded = room.eliminationsNeeded - eliminatedThisRound;
-    if (stillNeeded > 0) {
-      forceEliminateFurthest(room, stillNeeded);
-      const afterForced = getTournamentPlayers(room).filter(p => p.isAlive).length;
-      if (room.roundAliveCount - afterForced >= room.eliminationsNeeded) {
-        endBattleRound(roomCode);
-        return;
-      }
-    }
-  }
-
-  if (tournamentAlive.length === 1 && getTournamentPlayers(room).length === 1) {
-    if (Math.hypot(tournamentAlive[0].vx, tournamentAlive[0].vy) === 0) {
-      tournamentAlive[0].score += 1;
-      endMatch(roomCode, tournamentAlive[0]);
-      return;
-    }
+    endTournamentVolley(roomCode);
+    return;
   }
 
   // 5. Broadcast updated coordinates and collisions to clients
@@ -849,6 +868,7 @@ function endMatch(roomCode, winner) {
     winner: winner ? { id: winner.id, name: winner.name, color: winner.color } : null,
     stats: {
       collisions: room.stats ? room.stats.collisions : 0,
+      batHits: room.stats ? room.stats.batHits || 0 : 0,
       maxSpeed: Math.max(0, ...Object.values(room.players).map(p => p.maxSpeed || 0)),
       knockouts: Math.max(0, ...Object.values(room.players).map(p => p.knockouts || 0))
     },
@@ -1157,6 +1177,7 @@ io.on('connection', (socket) => {
     room.battleTicks = 0;
     room.stats = { collisions: 0 };
     room.tournamentRound = 0;
+    room.hasTournamentSpawned = false;
     room.eliminationsNeeded = 0;
     room.roundAliveCount = 0;
     Object.values(room.players).forEach(player => {
@@ -1177,6 +1198,7 @@ io.on('connection', (socket) => {
       player.hitImmuneUntil = 0;
       player.borderStrikeCooldownUntil = 0;
       player.lastHitBy = null;
+      player.lastHitTick = -Infinity;
     });
 
     console.log(`Room restarted: ${roomCode}`);
@@ -1223,11 +1245,8 @@ io.on('connection', (socket) => {
               }
             } else {
               const tournamentAlive = players.filter(p => p.inTournament && p.isAlive);
-              const eliminatedThisRound = room.roundAliveCount - tournamentAlive.length;
-              if (eliminatedThisRound >= room.eliminationsNeeded) {
-                endBattleRound(roomCode);
-              } else if (getTournamentPlayers(room).length <= 1) {
-                const winner = getTournamentPlayers(room)[0];
+              if (tournamentAlive.length <= 1) {
+                const winner = tournamentAlive[0];
                 if (winner) winner.score += 1;
                 endMatch(roomCode, winner || null);
               }
